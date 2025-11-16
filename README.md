@@ -124,6 +124,7 @@ Synthrace/
 - [Cyberpunk 2077](https://www.gog.com/de/game/cyberpunk_2077) **2.21+**
 - [Cyber Engine Tweaks](https://github.com/maximegmd/CyberEngineTweaks) **1.35+**
 - [RadioExt](https://github.com/justarandomguyintheinternet/CP77_radioExt) (required — provides the audio player)
+- [Native Settings UI](https://github.com/justarandomguyintheinternet/CP77_nativeSettings) (optional — provides a native location for the settings)
 
 ---
 
