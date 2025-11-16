@@ -86,13 +86,13 @@ Synthrace/music/My Playlist.json
 ```json
 {
     "songs": [
-        "radioExt\radios\100.1 Night City Faves\Friday Night Fire Fight.mp3",
-        "radioExt\radios\100.1 Night City Faves\Trauma.mp3",
-        "radioExt\radios\199,2 Lotus Ultimate\Lotus III - Metal Machine (Remix).mp3"
+        "radioExt\\radios\\100.1 Night City Faves\\Friday Night Fire Fight.mp3",
+        "radioExt\\radios\\100.1 Night City Faves\\Trauma.mp3",
+        "radioExt\\radios\\199,2 Lotus Ultimate\\Lotus III - Metal Machine (Remix).mp3"
     ],
     "outros": [
-        "Synthrace\music\#Default\RaceEnd1.mp3",
-        "Synthrace\music\#Default\RaceEnd2.mp3"
+        "Synthrace\\music\\#Default\\RaceEnd1.mp3",
+        "Synthrace\\music\\#Default\\RaceEnd2.mp3"
     ]
 }
 ```
