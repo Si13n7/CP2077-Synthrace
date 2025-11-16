@@ -13,7 +13,7 @@ are already provided by Lua or CET and exist
 only for documentation and coding convenience.
 
 Filename: api.lua
-Version: 2025-10-23, 20:43 UTC+01:00 (MEZ)
+Version: 2025-10-24, 22:01 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -21,18 +21,33 @@ ______________________________________________
 --]]
 
 
+---Style variables used to override ImGui layout and appearance settings temporarily.
+---@class ImGuiStyleVar
+---@field ItemSpacing { x: number, y: number } # Controls the horizontal (`x`) and vertical (`y`) spacing between consecutive UI elements. Can be overridden temporarily using `ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, x, y)` or restored with `ImGui.PopStyleVar()`.
+ImGuiStyleVar = ImGuiStyleVar
+
 ---Provides functions to create graphical user interface elements within the Cyber Engine Tweaks overlay.
 ---@class ImGui
 ---@field Begin fun(title: string, flags?: integer): boolean # Begins a new ImGui window with optional flags. Must be closed with `ImGui.End()`. Returns true if the window is open and should be rendered.
 ---@field End fun() # Ends the creation of the current ImGui window. Must always be called after `ImGui.Begin()`.
 ---@field Dummy fun(width: number, height: number) # Creates an invisible element of specified width and height, useful for spacing.
 ---@field SameLine fun(offsetX?: number, spacing?: number) # Places the next UI element on the same line. Optionally adds horizontal offset and spacing.
+---@field Text fun(text: string) # Displays text within the current window or tooltip.
+---@field PushTextWrapPos fun(wrapLocalPosX?: number) # Sets a maximum width (in pixels) for wrapping text. Applies to subsequent Text elements until `PopTextWrapPos()` is called. If no value is provided, wraps at the edge of the window.
+---@field PopTextWrapPos fun() # Restores the previous text wrapping position. Should be called after `PushTextWrapPos()` to reset wrapping behavior.
+---@field Button fun(label: string, width?: number, height?: number): boolean # Creates a clickable button with optional width and height. Returns true if the button was clicked.
 ---@field BeginCombo fun(label: string, previewValue: string, flags?: integer): boolean # Begins a combo box (drop-down list) with a preview value. Returns true if the combo is open and items should be drawn.
 ---@field Selectable fun(label: string, selected?: boolean, flags?: integer, sizeX?: number, sizeY?: number): boolean # Creates a selectable item inside a combo or list. Returns true if the item was clicked.
 ---@field InputInt fun(label: string, value: integer, step?: integer, stepFast?: integer, flags?: integer): integer, boolean # Creates an integer input field with optional increment and fast increment values. Returns the new value and a boolean indicating whether it was changed. In CET's Lua binding, the return order is reversed (`value, changed`).
 ---@field SetItemDefaultFocus fun() # Sets keyboard focus to the most recently added item if no other item is active. Commonly used inside combos or lists.
 ---@field EndCombo fun() # Ends the current combo box started with `ImGui.BeginCombo()`.
+---@field IsItemHovered fun(): boolean # Returns true if the last item is hovered by the mouse cursor.
+---@field PushStyleVar fun(var: ImGuiStyleVar, x: number, y?: number) # Temporarily overrides a style variable such as `ItemSpacing` or `FramePadding`. Must be followed by `ImGui.PopStyleVar()`. When two numbers are provided, they represent a vector value.
+---@field PopStyleVar fun(count?: integer) # Restores the most recently pushed style variable(s). The optional count parameter allows reverting multiple pushes at once.
 ---@field SetNextItemWidth fun(width: number) # Sets a fixed width for the next item (e.g., combo box, slider, or text input). Affects layout and alignment.
+---@field BeginTooltip fun() # Begins creating a tooltip. Must be paired with `ImGui.EndTooltip()`.
+---@field EndTooltip fun() # Ends the creation of a tooltip. Must be called after `ImGui.BeginTooltip()`.
+---@field GetStyle fun(): ImGuiStyleVar # Returns the current ImGui style object, which contains values for UI layout, spacing, padding, rounding, and more.
 ---@field GetFontSize fun(): number # Returns the height in pixels of the currently used font. Useful for vertical alignment calculations.
 ImGui = ImGui
 
@@ -88,6 +103,11 @@ Game = Game
 ---@field RaceStart integer # Triggered when a vehicle race begins.
 ---@field RaceEnd integer # Triggered when a vehicle race finishes.
 vehicleRaceUI = vehicleRaceUI
+
+---Retrieves a reference to a loaded CET mod by name.
+---@class GetMod # Not a class — provided by CET.
+---@field GetMod fun(name: string): table? # Returns the mod object if found, or `nil` if the mod is not loaded.
+GetMod = GetMod
 
 ---Provides functionality to replace or modify existing game functions at runtime.
 ---@class Override # Not a class — provided by CET.

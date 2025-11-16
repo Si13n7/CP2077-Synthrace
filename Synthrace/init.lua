@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: init.lua
-Version: 2025-10-23, 21:08 UTC+01:00 (MEZ)
+Version: 2025-10-24, 22:12 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -39,6 +39,11 @@ local format, concat, insert, unpack, abs, floor, random, randomseed, bxor =
 	math.random,
 	math.randomseed,
 	bit32.bxor
+
+---Loads all visible static string constants from `text.lua` into the global `Text` table.
+---This is the most efficient way to manage display strings separately from logic and code.
+---@type table<string, string>
+local Text = dofile("text.lua")
 
 ---Constant names of audio options read from the game's user settings (used for mute/restore).
 ---@type string[]
@@ -115,6 +120,40 @@ local async = {
 	---Used to skip unnecessary processing in `onUpdate` event when no timers exist.
 	isActive = false
 }
+
+---Reference to the loaded `nativeSettings` mod instance, or nil if unavailable.
+local native = nil
+
+---Writes a formatted log message to the CET console with a specified log level prefix.
+---@param lvl string # Log level label (e.g. "Info", "Warning", "Error").
+---@param fmt string # Format string (printf-style) for the log message.
+---@param ... any # Optional arguments to be formatted into the message.
+local function log(lvl, fmt, ...)
+	if not lvl or not fmt then return end
+	local prefix = format("[%s]  [%s]  ", Text.GUI_NAME, lvl)
+	print(select("#", ...) and format(prefix .. fmt, ...) or fmt)
+end
+
+---Logs an error message to the CET console.
+---@param fmt string # Format string for the error message.
+---@param ... any # Optional arguments to be formatted into the message.
+local function logErr(fmt, ...)
+	log("Error", fmt, ...)
+end
+
+---Logs a warning message to the CET console.
+---@param fmt string # Format string for the warning message.
+---@param ... any # Optional arguments to be formatted into the message.
+local function logWarn(fmt, ...)
+	log("Warning", fmt, ...)
+end
+
+---Logs an informational message to the CET console.
+---@param fmt string # Format string for the info message.
+---@param ... any # Optional arguments to be formatted into the message.
+local function logInfo(fmt, ...)
+	log("Info", fmt, ...)
+end
 
 ---Stops and removes an active async timer with the given ID.
 ---Has no effect if the ID is invalid or already cleared.
@@ -406,7 +445,7 @@ end
 
 ---Checks whether a music file with the given name exists in the `music` directory.
 ---@param name string # The base filename (without path or extension).
----@param source string? # WIP
+---@param source string? # Source folder name. If nil, the current active audio source is used.
 ---@return boolean # True if the corresponding MP3 file exists, false otherwise.
 local function audioFileExists(name, source)
 	if not name then return false end
@@ -430,20 +469,27 @@ local function getAudioSources()
 	local folders = dir(getAudioBaseDir(true))
 	for _, folder in ipairs(folders) do
 		local source = folder.name
-		if source ~= "#Default" and not source:match("^%a[%w_-]*$") then goto continue end
+		if source ~= "#Default" and not source:match('^%w[^<>:"/\\|%?%*]*$') then
+			logErr(Text.LOG_FOLDER_INVALID, source)
+			goto continue
+		end
 
 		local isValid = true
-		for n, prefix in ipairs({ "RaceEnd", "RaceStart" }) do
-			local count = n == 1 and 2 or 4
-			for i = 1, count do
-				if not audioFileExists(prefix .. i, source) then
+		for _, prefix in ipairs({ "RaceEnd", "RaceStart" }) do
+			for i = 1, 2 do
+				local name = prefix .. i
+				if not audioFileExists(name, source) then
 					isValid = false
+					logErr(Text.LOG_FILE_MISSING, name, source)
 					break
 				end
 			end
 			if not isValid then break end
 		end
-		if isValid then insert(sources, source) end
+		if isValid then
+			insert(sources, source)
+			logInfo(Text.LOG_FOLDER_ADDED, source)
+		end
 
 		::continue::
 	end
@@ -462,6 +508,7 @@ local function getAudioIndex(name)
 			return i
 		end
 	end
+	logErr(Text.LOG_FILE_NOT_FOUND, name)
 	return 0
 end
 
@@ -478,8 +525,8 @@ local function getAudioCount()
 
 	local map = {}
 	for _, file in ipairs(files) do
-		local name = file.name
-		local num = tonumber(name:match("^RaceStart(%d+)%.mp3$"))
+		local name = file.name:lower()
+		local num = tonumber(name:match("^racestart(%d+)%.mp3$"))
 		if num then map[num] = true end
 	end
 
@@ -587,10 +634,129 @@ local function reset()
 	restoreGlobalVolume()
 end
 
+---Initializes and registers all mod settings within the Native Settings UI.
+local function createNativeMenu()
+	local instance = native or GetMod("nativeSettings")
+	if not instance then return end
+	native = instance
+
+	local tab = "/Synthrace"
+	if not instance.pathExists(tab) then
+		instance.addTab(tab, Text.GUI_NAME)
+	end
+
+	--Ensures that multiple save queues aren't started simultaneously.
+	local isSavePending = false
+
+	---Asynchronous queue that delays saving until the settings tab is closed.
+	local function saveToFile()
+		if isSavePending then return end
+
+		isSavePending = true
+		asyncRepeat(3, function(timerID)
+			if not instance.currentTab or #instance.currentTab < 1 then
+				asyncStop(timerID)
+				saveDatabase()
+				isSavePending = false
+			end
+		end)
+	end
+
+	---Adds a settings option dynamically based on its type (list, boolean, or numeric).
+	---Used internally to register configuration entries with the native settings system.
+	---@param section string # The subcategory where the option appears in the Settings UI.
+	---@param label string # Display name shown in the settings UI.
+	---@param desc string # Description text.
+	---@param default number|boolean # Default value for the option.
+	---@param value number|boolean # Current value of the option.
+	---@param min number? # Minimum numeric value (for sliders).
+	---@param max number? # Maximum numeric value (for sliders).
+	---@param speed number? # Step size for numeric options; fractional speeds imply float sliders.
+	---@param list string[]? # Optional list of selectable string values.
+	---@param setValue function # Callback used when the value changes.
+	local function addOption(section, label, desc, default, value, min, max, speed, list, setValue)
+		if type(list) == "table" and next(list) then
+			instance.addSelectorString(section, label, desc, list, value, default, setValue)
+		elseif type(default) == "number" then
+			speed = speed or 1
+			instance.addRangeInt(
+				section,
+				label,
+				desc,
+				min,
+				max,
+				speed,
+				value,
+				default,
+				setValue
+			)
+		end
+	end
+
+	local cat = tab .. "/Settings"
+	if instance.pathExists(cat) then
+		instance.removeSubcategory(cat)
+	end
+	instance.addSubcategory(cat, Text.GUI_TITLE)
+
+	local sources = getAudioSources()
+	addOption(cat, Text.GUI_PLAYLIST, Text.GUI_PLAYLIST_TIP, 1, audio.index, 1, #sources, 1, sources,
+		function(value)
+			audio.count = -1
+			audio.index = value
+			audio.source = sources[value]
+			saveToFile()
+		end
+	)
+
+	instance.addButton(cat, nil, Text.GUI_REFRESH_TIP, Text.GUI_REFRESH, 40, function()
+		audio.count = -1
+		audio.index = 1
+		audio.sources = {}
+		createNativeMenu()
+	end)
+
+	addOption(cat, Text.GUI_VOLUME, Text.GUI_VOLUME_TIP, 70, audio.volume, 10, 200, 1, nil,
+		function(value)
+			audio.volume = math.max(10, math.min(200, floor(value)))
+			saveToFile()
+		end
+	)
+end
+
+---Displays a tooltip when the current UI item is hovered.
+---@param scale number? # The resolution scale for wrapping text.
+---@param text string # The tooltip text.
+local function addTooltip(scale, text)
+	if not ImGui.IsItemHovered() then return end
+
+	ImGui.BeginTooltip()
+
+	local wrap = scale and floor(210 * scale) or nil
+	if wrap then
+		ImGui.PushTextWrapPos(wrap)
+	end
+
+	ImGui.Text(text)
+
+	if wrap then
+		ImGui.PopTextWrapPos()
+	end
+
+	ImGui.EndTooltip()
+end
+
 ---This event is triggered when the CET initializes this mod.
 registerForEvent("onInit", function()
+	--Ensures the log file is fresh when the mod initializes.
+	pcall(function()
+		local file = io.open("Synthrace.log", "w")
+		if file then file:close() end
+	end)
+
+	--RadioExt dependencies.
 	if type(RadioExt) ~= "userdata" then
-		print("[Synthrace] RadioExt not found - mod has been disabled!")
+		logWarn(Text.LOG_EXT_NOT_FOUND)
 		return
 	end
 
@@ -690,6 +856,9 @@ registerForEvent("onInit", function()
 			end
 		end
 	end
+
+	--Initializes the Native Settings UI addon.
+	asyncOnce(3, createNativeMenu)
 end)
 
 --Detects when the CET overlay is opened.
@@ -702,23 +871,29 @@ registerForEvent("onOverlayClose", function()
 	overlay.isOpen = false
 	if audio.isUnsaved then
 		saveDatabase()
+		if native then
+			createNativeMenu()
+		end
 	end
 end)
 
 --Display a simple GUI with some options.
 registerForEvent("onDraw", function()
-	if not overlay.isOpen or not ImGui.Begin("\u{f023c} Synthrace", ImGuiWindowFlags.AlwaysAutoResize) then return end
+	if not overlay.isOpen or not ImGui.Begin(Text.GUI_NAME, ImGuiWindowFlags.AlwaysAutoResize) then return end
 
 	local scale = ImGui.GetFontSize() / 18
-	local controlWidth = floor(120 * scale)
+	local buttonSize = 24 * scale
+	local widthPadding = 4 * scale
 	local heightPadding = 2 * scale
+	local style = ImGui.GetStyle()
 	ImGui.Dummy(0, heightPadding)
 
 	local sources = getAudioSources()
 	local current = audio.index
 	local preview = sources[current]
-	ImGui.SetNextItemWidth(controlWidth)
-	if ImGui.BeginCombo("Audio Source", preview) then
+	ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, widthPadding, style.ItemSpacing.y)
+	ImGui.SetNextItemWidth(120 * scale)
+	if ImGui.BeginCombo("##Source", preview) then
 		for i, item in ipairs(sources) do
 			local isSelected = current == i
 			if ImGui.Selectable(item, isSelected) and current ~= i then
@@ -733,10 +908,24 @@ registerForEvent("onDraw", function()
 		end
 		ImGui.EndCombo()
 	end
+	addTooltip(scale, Text.GUI_PLAYLIST_TIP)
+	ImGui.SameLine()
+	if ImGui.Button("\u{f0450}", buttonSize, buttonSize) then
+		audio.count = -1
+		audio.index = 1
+		audio.sources = {}
+		createNativeMenu()
+	end
+	addTooltip(scale, Text.GUI_REFRESH_TIP)
+	ImGui.PopStyleVar()
+	ImGui.SameLine()
+	ImGui.Text(Text.GUI_PLAYLIST)
+	addTooltip(scale, Text.GUI_PLAYLIST_TIP)
 	ImGui.Dummy(0, heightPadding)
 
-	ImGui.SetNextItemWidth(controlWidth)
-	local volume, changed = ImGui.InputInt("Audio Volume", audio.volume, 5, 10)
+	ImGui.SetNextItemWidth(148 * scale)
+	local volume, changed = ImGui.InputInt("##Volume", audio.volume, 5, 10)
+	addTooltip(scale, Text.GUI_VOLUME_TIP)
 	if changed then
 		volume = floor(volume)
 		if audio.volume ~= volume then
@@ -744,6 +933,9 @@ registerForEvent("onDraw", function()
 			audio.isUnsaved = true
 		end
 	end
+	ImGui.SameLine()
+	ImGui.Text(Text.GUI_VOLUME)
+	addTooltip(scale, Text.GUI_VOLUME_TIP)
 	ImGui.Dummy(0, heightPadding)
 
 	ImGui.End()
