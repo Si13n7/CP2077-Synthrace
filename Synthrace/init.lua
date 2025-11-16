@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: init.lua
-Version: 2025-10-26, 14:00 UTC+01:00 (MEZ)
+Version: 2025-10-28, 12:32 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -153,6 +153,25 @@ local refs = {
 	---@type CyberTrials
 	cyberTrials = nil
 }
+
+---Safely retrieves a nested value from a table (e.g., table[one][two][three]).
+---Returns a default value if any level is missing or invalid.
+---@param t table # The root table to access.
+---@param fallback any # The fallback value if the lookup fails.
+---@param ... any # One or more keys representing the path.
+---@return any # The nested value if it exists, or the default value.
+local function get(t, fallback, ...)
+	if type(t) ~= "table" then return fallback end
+	local v = t
+	for i = 1, select("#", ...) do
+		local k = select(i, ...)
+		if type(v) ~= "table" or k == nil then
+			return fallback
+		end
+		v = rawget(v, k)
+	end
+	return v == nil and fallback or v
+end
 
 ---Writes a formatted log message to the CET console with a specified log level prefix.
 ---@param lvl string # Log level label (e.g. "Info", "Warning", "Error").
@@ -656,12 +675,12 @@ end
 
 ---Initializes and registers all mod settings within the Native Settings UI.
 local function createNativeMenu()
-	local instance = refs.nativeSettings
-	if not instance then return end
+	local ns = refs.nativeSettings
+	if not ns then return end
 
 	local tab = "/Synthrace"
-	if not instance.pathExists(tab) then
-		instance.addTab(tab, Text.GUI_NAME)
+	if not ns.pathExists(tab) then
+		ns.addTab(tab, Text.GUI_NAME)
 	end
 
 	--Ensures that multiple save queues aren't started simultaneously.
@@ -673,7 +692,7 @@ local function createNativeMenu()
 
 		isSavePending = true
 		asyncRepeat(3, function(timerID)
-			if not instance.currentTab or #instance.currentTab < 1 then
+			if not ns.currentTab or #ns.currentTab < 1 then
 				asyncStop(timerID)
 				saveDatabase()
 				isSavePending = false
@@ -695,10 +714,10 @@ local function createNativeMenu()
 	---@param setValue function # Callback used when the value changes.
 	local function addOption(section, label, desc, default, value, min, max, speed, list, setValue)
 		if type(list) == "table" and next(list) then
-			instance.addSelectorString(section, label, desc, list, value, default, setValue)
+			ns.addSelectorString(section, label, desc, list, value, default, setValue)
 		elseif type(default) == "number" then
 			speed = speed or 1
-			instance.addRangeInt(
+			ns.addRangeInt(
 				section,
 				label,
 				desc,
@@ -713,10 +732,10 @@ local function createNativeMenu()
 	end
 
 	local cat = tab .. "/Settings"
-	if instance.pathExists(cat) then
-		instance.removeSubcategory(cat)
+	if ns.pathExists(cat) then
+		ns.removeSubcategory(cat)
 	end
-	instance.addSubcategory(cat, Text.GUI_TITLE)
+	ns.addSubcategory(cat, Text.GUI_TITLE)
 
 	local sources = getAudioSources()
 	addOption(cat, Text.GUI_PLAYLIST, Text.GUI_PLAYLIST_TIP, 1, audio.index, 1, #sources, 1, sources,
@@ -728,7 +747,7 @@ local function createNativeMenu()
 		end
 	)
 
-	instance.addButton(cat, nil, Text.GUI_REFRESH_TIP, Text.GUI_REFRESH, 40,
+	ns.addButton(cat, nil, Text.GUI_REFRESH_TIP, Text.GUI_REFRESH, 40,
 		function()
 			audio.count = -1
 			audio.index = 1
@@ -811,22 +830,38 @@ registerForEvent("onInit", function()
 			stopAudio()
 			return
 		end
+		local ct = refs.cyberTrials
 		if mode == vehicleRaceUI.RaceStart then
+			if ct.raceActive then
+				ct.curTrackHook = ct.getTrackName()
+				ct.prevTimeHook = ct.getBestTimeHook(ct.curTrackHook)
+			end
 			playAudioRandomLoop()
 			logInfo(Text.LOG_RACE_STARTED)
 		elseif mode == vehicleRaceUI.RaceEnd then
-			local position = tonumber(Game.GetQuestsSystem():GetFactStr("sq024_current_race_player_position")) or 0
-			if position > 1 then
-				playAudio("RaceEnd2", true)
-			else
-				playAudio("RaceEnd1", true)
-			end
-			if refs.cyberTrials.raceActive then
-				audio.isProtected = true
+			if ct.raceActive then
+				local isTraveling = ct.backToStartOnFinishHook()
+				local isCompleted = ct.isRaceCompletedHook()
+
+				stopAudio()
+				muteGlobalVolume()
+
+				audio.isProtected = isCompleted and isTraveling
+				asyncRepeat(1, function(id)
+					if audio.isProtected then return end
+					asyncStop(id)
+
+					local isBestTime = ct.getBestTimeHook(ct.curTrackHook) < ct.prevTimeHook
+					playAudio(isBestTime and "RaceEnd1" or "RaceEnd2", true)
+				end)
+
 				logInfo(Text.LOG_RACE_ENDED)
-			else
-				logInfo(Text.LOG_RACE_FINISHED, position)
+				return
 			end
+
+			local position = tonumber(Game.GetQuestsSystem():GetFactStr("sq024_current_race_player_position")) or 0
+			playAudio(position > 1 and "RaceEnd2" or "RaceEnd1", true)
+			logInfo(Text.LOG_RACE_FINISHED, position)
 		end
 	end)
 
@@ -875,8 +910,11 @@ registerForEvent("onInit", function()
 		for event, scenarios in pairs(events) do
 			scenarios = type(scenarios) == "table" and scenarios or { scenarios }
 			for _, scenario in ipairs(scenarios) do
-				Observe(scenario, event, function()
+				Observe(scenario, event, function(_, x)
 					if audio.isProtected and event == "SetProgress" then
+						if type(x) == "number" then
+							audio.isProtected = x < 1.0
+						end
 						return
 					end
 					handler()
@@ -887,17 +925,64 @@ registerForEvent("onInit", function()
 
 	--Handle optional dependencies.
 	asyncOnce(2, function()
-		local native = GetMod("nativeSettings")
-		if type(native) == "table" then
-			refs.nativeSettings = native
+		local ns = GetMod("nativeSettings")
+		if type(ns) == "table" then
+			refs.nativeSettings = ns
 			logInfo(Text.LOG_DEP_REFERENCED, "Native Settings UI")
 			createNativeMenu()
 		end
 
-		local trials = GetMod("CyberTrials")
-		if type(trials) == "table" then
-			refs.cyberTrials = trials
+		local ct = GetMod("CyberTrials")
+		if type(ct) == "table" then
+			refs.cyberTrials = ct
 			logInfo(Text.LOG_DEP_REFERENCED, "Cyber Trials")
+
+			---Checks if the current race is completed.
+			---Requires `CyberTrials-Patch.bat` to inject `raceLogicHook`.
+			---@return boolean # Checks if the race has been completed based on current and total checkpoints.
+			ct.isRaceCompletedHook = function()
+				if not ct.isPatched then return true end
+				if not ct.raceActive then return false end
+				local current = get(ct.raceLogicHook, 0, "cpNumber")
+				local total = get(ct.raceLogicHook, 0, "track", "totalCheckpoints")
+				return abs(current - total) < 1e-4
+			end
+
+			---Reads the 'back to start' option from user settings.
+			---Requires `CyberTrials-Patch.bat` to inject `userHook`.
+			---@return boolean # Returns true if the user setting 'backToStartOnFinish' is enabled.
+			ct.backToStartOnFinishHook = function()
+				if not ct.isPatched then return false end
+				return get(ct.userHook, false, "settings", "backToStartOnFinish") == true
+			end
+
+			---Retrieves the current race track name from the active race logic.
+			---Requires `CyberTrials-Patch.bat` to inject `raceLogicHook`.
+			---@return string? # The current track name, or nil if not available.
+			ct.getTrackName = function()
+				if not ct.isPatched then return nil end
+				return get(ct.raceLogicHook, nil, "track", "name")
+			end
+
+			---Retrieves the best recorded race time for a given track.
+			---Requires `CyberTrials-Patch.bat` to inject `userHook`.
+			---@param name string # The track name used to look up recorded times.
+			---@return number # The best recorded time in milliseconds, or infinity if unavailable.
+			ct.getBestTimeHook = function(name)
+				if not ct.isPatched or not name then return math.huge end
+				local times = get(ct.userHook, nil, "recentTimes") or {}
+				local current = times[name]
+				if current then
+					table.sort(current, function(a, b)
+						return a.totalMillisecs < b.totalMillisecs
+					end)
+					if current[1] then
+						local ms = current[1].totalMillisecs
+						return ms > 1 and ms or math.huge
+					end
+				end
+				return math.huge
+			end
 		else
 			refs.cyberTrials = { raceActive = false }
 		end
