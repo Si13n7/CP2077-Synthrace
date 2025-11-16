@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: init.lua
-Version: 2025-10-23, 01:20 UTC+01:00 (MEZ)
+Version: 2025-10-23, 21:08 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -48,32 +48,58 @@ local OptionVars = {
 	"RadioportVolume"
 }
 
----Holds runtime state for playback, looping, radio restore and volume backup.
-local state = {
-	---Determines whether a custom audio track is currently playing.
+---Audio playback, configuration, and persistence state.
+local audio = {
+	---True if a custom audio track is currently playing.
 	isPlaying = false,
 
-	---Stores the calculated maximum playback volume between 0 and 1.
-	maxVolume = -1,
-
-	---Determines whether a looping track sequence is active.
+	---True if a looping track sequence is active.
 	isLoopActive = false,
 
-	---Async timer ID for the currently active loop sequence.
+	---Async timer ID of the currently running loop.
 	currentLoopId = -1,
 
 	---Index of the last randomly played track to avoid repetition.
 	lastLoopIndex = -1,
 
-	---Prevents immediate reactivation of the last radio station when toggling between mod and in-game radio.
-	isLastStationProtected = false,
+	---Number of valid `RaceStart` tracks in the current audio source. Automatically recalculated when set below 0.
+	count = -1,
 
-	---Index of the last active in-game radio station, used for restoring playback.
+	---Index of the currently selected audio source.
+	index = 1,
+
+	---Name of the currently selected audio source folder.
+	source = "#Default",
+
+	---List of available audio source folder names.
+	---@type string[]
+	sources = {},
+
+	---Global audio volume level (range 10–200).
+	volume = 70,
+
+	---True if configuration changes are pending.
+	isUnsaved = false
+}
+
+---Contains runtime data related to in-game systems such as radio and audio channels.
+local game = {
+	---Prevents instant reactivation of the last in-game radio station.
+	isRadioProtected = false,
+
+	---Index of the last active in-game radio station for later restoration.
 	lastRadioStation = -1,
 
-	---Stores previously active in-game audio channel volumes for restoration.
+	---Stores the original in-game audio channel volumes before custom playback overrides them.
+	---Used to restore the game's volume mix after mod playback stops.
 	---@type table<string, number>
-	volumeRestoreStack = {},
+	volumeRestoreStack = {}
+}
+
+---Overlay and UI visibility state.
+local overlay = {
+	---True if the overlay or settings menu is currently visible.
+	isOpen = false
 }
 
 ---Manages recurring asynchronous timers and their status.
@@ -96,7 +122,7 @@ local async = {
 local function asyncStop(id)
 	if not id or id < 0 then return end
 	async.timers[id] = nil
-	async.isActive = type(async.timers) == "table" and next(async.timers) ~= nil
+	async.isActive = next(async.timers) ~= nil
 end
 
 ---Creates a recurring async timer that executes a callback every `interval` seconds.
@@ -213,43 +239,69 @@ local function sqliteDelete(tableName, keyColumn, keyValue)
 	db:exec(format("DELETE FROM %s WHERE %s='%s';", tableName, keyColumn, keyValue:gsub("'", "''")))
 end
 
----Initializes the database structure and creates necessary tables if missing.
-local function initDatabase()
+---Initializes the database structure and creates required tables if they do not exist.
+---@param backup boolean? # If true, initializes the backup table (`VolumeRestoreStack`); otherwise initializes the main configuration table (`UserConfig`).
+local function initDatabase(backup)
 	sqliteInit(
-		"VolumeRestoreStack",
+		backup and "VolumeRestoreStack" or "UserConfig",
 		"Name TEXT PRIMARY KEY",
-		"Volume INTEGER"
+		backup and "Value INTEGER" or "Value STRING"
 	)
 end
 
----Loads persisted volume data from the database into memory.
-local function loadDatabase()
-	initDatabase()
-	for row in sqliteRows("VolumeRestoreStack", "Name, Volume") do
-		local key, volume = unpack(row)
-		state.volumeRestoreStack[key] = volume
+---Loads persisted data from the SQLite database into memory.
+---@param backup boolean? # If true, loads the volume restoration stack; otherwise loads user configuration data.
+local function loadDatabase(backup)
+	initDatabase(backup)
+	for row in sqliteRows(backup and "VolumeRestoreStack" or "UserConfig", "Name, Value") do
+		local name, value = unpack(row)
+		if backup then
+			game.volumeRestoreStack[name] = value
+		else
+			local current = audio[name]
+			if current then
+				audio[name] = type(current) == "number" and tonumber(value) or value
+			end
+		end
 	end
 end
 
----Writes current in-memory volume data back to the database.
-local function saveDatabase()
-	initDatabase()
+---Persists the current in-memory state back to the database.
+---@param backup boolean? # If true, writes the volume restoration stack; otherwise writes user configuration data.
+local function saveDatabase(backup)
+	initDatabase(backup)
 
 	sqliteBegin()
 
-	if next(state.volumeRestoreStack) == nil then
-		for _, name in ipairs(OptionVars) do
-			sqliteDelete("VolumeRestoreStack", "Name", name)
+	if backup then
+		if not next(game.volumeRestoreStack) then
+			for _, name in ipairs(OptionVars) do
+				sqliteDelete("VolumeRestoreStack", "Name", name)
+			end
+
+			sqliteCommit()
+			return
+		else
+			for name, value in pairs(game.volumeRestoreStack) do
+				sqliteUpsert("VolumeRestoreStack", "Name", {
+					Name = name,
+					Value = value
+				})
+			end
 		end
 
 		sqliteCommit()
 		return
 	end
 
-	for name, volume in pairs(state.volumeRestoreStack) do
-		sqliteUpsert("VolumeRestoreStack", "Name", {
+	local configData = {
+		source = audio.source,
+		volume = format("%d", audio.volume)
+	}
+	for name, value in pairs(configData) do
+		sqliteUpsert("UserConfig", "Name", {
 			Name = name,
-			Volume = volume
+			Value = value
 		})
 	end
 
@@ -272,96 +324,172 @@ local function getConfigVar(option)
 	return sys and sys:HasVar(group, option) and sys:GetVar(group, option) or nil
 end
 
----Retrieves the numeric value of a configuration variable.
----@param option string # The option key, e.g., "MusicVolume".
----@return number # The option value or 0 if unavailable.
-local function getConfigValue(option)
-	local var = getConfigVar(option)
-	local kind = var and var:GetType() ---@cast var ConfigVar
-	return tonumber(kind and kind.value == "Int" and var:GetValue()) or 0
-end
-
 ---Mutes all global audio channels while preserving their original volume levels.
 local function muteGlobalVolume()
-	local backup = state.volumeRestoreStack
+	local backup = game.volumeRestoreStack
 	for _, option in ipairs(OptionVars) do
+		if backup[option] then goto continue end
+
 		local var = getConfigVar(option)
-		if var then
-			backup[option] = backup[option] or tonumber(var:GetValue()) or nil
-			if backup[option] then
-				var:SetValue(0)
-			end
+		if not var then goto continue end
+
+		backup[option] = tonumber(var:GetValue()) or nil
+		if backup[option] then
+			var:SetValue(0)
 		end
+
+		::continue::
 	end
-	saveDatabase()
+	saveDatabase(true)
 end
 
 ---Restores previously muted audio channels to their original volume levels.
 local function restoreGlobalVolume()
-	local backup = state.volumeRestoreStack
+	local backup = game.volumeRestoreStack
 	for _, option in ipairs(OptionVars) do
-		local var = getConfigVar(option)
-		if var and backup[option] then
-			var:SetValue(backup[option])
-			backup[option] = nil
-		end
-	end
-	saveDatabase()
-end
+		if not backup[option] then goto continue end
 
----Calculates the effective playback volume based on current audio settings.
----@return number # The normalized playback volume between 0.0 and 1.0.
-local function getMaxVolume()
-	local volume = 0
-	for _, option in pairs(OptionVars) do
-		volume = math.max(volume, getConfigValue(option))
+		local var = getConfigVar(option)
+		if not var then goto continue end
+
+		var:SetValue(backup[option])
+		backup[option] = nil
+
+		::continue::
 	end
-	return math.max(volume * 0.5, 30) / 100
+	saveDatabase(true)
 end
 
 ---Stops any active in-game radio playback.
 local function stopRadio()
 	local manager = getQuickSlotsManager()
 	if manager then
-		state.isLastStationProtected = true
-		manager:SendRadioEvent(false, false, -1)
+		game.isRadioProtected = true
+		manager:SendRadioEvent(false, false, game.lastRadioStation)
 	end
 end
 
 ---Resumes the previously active in-game radio station.
 local function resumeRadio()
-	if state.lastRadioStation < 0 then return end
+	if game.lastRadioStation < 0 then return end
 
 	local manager = getQuickSlotsManager()
 	if manager then
-		manager:SendRadioEvent(true, true, state.lastRadioStation)
+		manager:SendRadioEvent(true, true, game.lastRadioStation)
 	end
 end
 
----Builds the full file path for a given audio track name.
----@param name string # The base filename (without extension).
----@param isCetHome boolean? # If true, returns the relative path from the CET `music` directory; otherwise returns the absolute mod path.
----@return string # The constructed file path to the MP3 file, or an empty string if the name is invalid.
-local function getAudioPath(name, isCetHome)
+---Returns the base directory for all audio sources.
+---@param isCetHome boolean? # If true, returns the CET-relative `music` path; otherwise returns the absolute mod path.
+---@return string # Path to the audio base directory.
+local function getAudioBaseDir(isCetHome)
+	return isCetHome and "music" or "plugins\\cyber_engine_tweaks\\mods\\Synthrace\\music"
+end
+
+---Builds the path to a specific audio source folder.
+---@param isCetHome boolean? # If true, returns a CET-relative path; otherwise an absolute mod path.
+---@param source string? # Source folder name. If nil, the current source from `audio.sources[audio.index]` is used.
+---@return string # Path to the selected audio source directory
+local function getAudioSourceDir(isCetHome, source)
+	return format("%s\\%s", getAudioBaseDir(isCetHome), source and source or audio.sources[audio.index])
+end
+
+---Builds the full file path for a given audio track.
+---@param name string # Base filename without extension.
+---@param isCetHome boolean? # If true, returns a CET-relative path; otherwise the full absolute path.
+---@param source string? # Source folder name. If nil, the current active audio source is used.
+---@return string # The full path to the MP3 file, or an empty string if the name is invalid.
+local function getAudioPath(name, isCetHome, source)
 	if not name then return "" end
-	if isCetHome then
-		return format("music\\%s.mp3", name)
-	end
-	return format("plugins\\cyber_engine_tweaks\\mods\\Synthrace\\music\\%s.mp3", name)
+	return format("%s\\%s.mp3", getAudioSourceDir(isCetHome, source), name)
 end
 
 ---Checks whether a music file with the given name exists in the `music` directory.
 ---@param name string # The base filename (without path or extension).
+---@param source string? # WIP
 ---@return boolean # True if the corresponding MP3 file exists, false otherwise.
-local function audioFileExists(name)
+local function audioFileExists(name, source)
 	if not name then return false end
-	local path = getAudioPath(name, true)
+	local path = getAudioPath(name, true, source)
 	local handle = io.open(path, "r")
 	if handle then
 		handle:close()
 		return true
 	end
 	return false
+end
+
+---Retrieves and validates available audio source folders.
+---Only accepts folder names that start with a letter and contain only alphanumeric characters, underscores, or dashes.
+---Skips invalid entries and populates `audio.sources` with verified sources.
+---@return string[] # List of valid audio source folder names.
+local function getAudioSources()
+	local sources = audio.sources or {}
+	if next(sources) then return sources end
+
+	local folders = dir(getAudioBaseDir(true))
+	for _, folder in ipairs(folders) do
+		local source = folder.name
+		if source ~= "#Default" and not source:match("^%a[%w_-]*$") then goto continue end
+
+		local isValid = true
+		for n, prefix in ipairs({ "RaceEnd", "RaceStart" }) do
+			local count = n == 1 and 2 or 4
+			for i = 1, count do
+				if not audioFileExists(prefix .. i, source) then
+					isValid = false
+					break
+				end
+			end
+			if not isValid then break end
+		end
+		if isValid then insert(sources, source) end
+
+		::continue::
+	end
+
+	audio.sources = sources
+	return sources
+end
+
+---Returns the index of a given audio source name.
+---@param name string # Audio source name to look up.
+---@return integer # Index position in the source list, or 0 if not found.
+local function getAudioIndex(name)
+	local sources = getAudioSources()
+	for i, source in ipairs(sources) do
+		if source == name then
+			return i
+		end
+	end
+	return 0
+end
+
+---Counts the number of sequentially indexed `RaceStart` tracks in the current source directory.
+---@return integer # Number of valid `RaceStart` tracks found.
+local function getAudioCount()
+	if audio.count >= 0 then return audio.count end
+
+	local src = audio.source
+	if not src then return 0 end
+
+	local files = dir(getAudioSourceDir(true, src))
+	if not files or not next(files) then return 0 end
+
+	local map = {}
+	for _, file in ipairs(files) do
+		local name = file.name
+		local num = tonumber(name:match("^RaceStart(%d+)%.mp3$"))
+		if num then map[num] = true end
+	end
+
+	for i = 1, 99 do
+		if not map[i] then
+			audio.count = i - 1
+			break
+		end
+	end
+	return audio.count
 end
 
 ---Retrieves the duration of an audio file in seconds.
@@ -376,25 +504,25 @@ end
 
 ---Mutes the currently playing custom audio without stopping it.
 local function muteAudio()
-	if not state.isPlaying then return end
+	if not audio.isPlaying then return end
 	RadioExt.SetVolume(-1, 0)
 end
 
 ---Restores volume for the currently playing custom audio.
 local function unmuteAudio()
-	if not state.isPlaying or state.maxVolume < 0 then return end
-	RadioExt.SetVolume(-1, state.maxVolume)
+	if not audio.isPlaying or audio.volume < 0 then return end
+	RadioExt.SetVolume(-1, audio.volume / 100)
 end
 
 ---Completely stops the currently playing custom audio and resets state.
 local function stopAudio()
-	if not state.isPlaying then return end
+	if not audio.isPlaying then return end
 
-	state.isPlaying = false
-	state.isLoopActive = false
+	audio.isPlaying = false
+	audio.isLoopActive = false
 
-	asyncStop(state.currentLoopId)
-	state.currentLoopId = -1
+	asyncStop(audio.currentLoopId)
+	audio.currentLoopId = -1
 
 	RadioExt.Stop(-1)
 
@@ -410,15 +538,12 @@ local function playAudio(name, doRestore)
 	stopAudio()
 	stopRadio()
 
-	state.isPlaying = true
+	audio.isPlaying = true
 
-	local volume = getMaxVolume()
-	state.maxVolume = volume
-
-	local path = getAudioPath(name)
-
+	local volume = audio.volume / 100
 	muteGlobalVolume()
 
+	local path = getAudioPath(name)
 	RadioExt.Play(-1, path, -1, volume, 0)
 
 	if not doRestore then return end
@@ -434,22 +559,22 @@ end
 local function playAudioRandomLoop()
 	local num, name
 	for _ = 1, 10 do
-		num = random(1, 8)
+		num = random(1, getAudioCount())
 		name = "RaceStart" .. num
-		if audioFileExists(name) and state.lastLoopIndex ~= num then
+		if audioFileExists(name) and audio.lastLoopIndex ~= num then
 			break
 		end
 	end
-	state.lastLoopIndex = num
+	audio.lastLoopIndex = num
 
 	playAudio(name)
 
 	local delay = getAudioDuration(name)
 	if delay <= 1 then return end
 
-	state.isLoopActive = true
-	state.currentLoopId = asyncRepeat(delay, function()
-		if not state.isLoopActive then return end
+	audio.isLoopActive = true
+	audio.currentLoopId = asyncRepeat(delay, function()
+		if not audio.isLoopActive then return end
 		playAudioRandomLoop()
 	end)
 end
@@ -462,7 +587,7 @@ local function reset()
 	restoreGlobalVolume()
 end
 
---This event is triggered when the CET initializes this mod.
+---This event is triggered when the CET initializes this mod.
 registerForEvent("onInit", function()
 	if type(RadioExt) ~= "userdata" then
 		print("[Synthrace] RadioExt not found - mod has been disabled!")
@@ -475,19 +600,30 @@ registerForEvent("onInit", function()
 
 	--If the game crashed for any reason, this ensures that all
 	--changes made by this mod are reverted on the next startup.
-	loadDatabase()
+	loadDatabase(true)
 	restoreGlobalVolume()
+
+	--Load user config.
+	loadDatabase()
+
+	--Validate user config data.
+	audio.index = getAudioIndex(audio.source)
+	if audio.index < 1 then
+		audio.count = -1
+		audio.index = 1
+		audio.source = "#Default"
+	end
 
 	--Overrides the activation behavior of the vehicle radio menu to track the last selected radio station.
 	Override("VehicleRadioPopupGameController", "Activate", function(self, wrapper)
-		if state.isLastStationProtected then
-			state.isLastStationProtected = false
+		if game.isRadioProtected then
+			game.isRadioProtected = false
 			return
 		end
 		local selected = self.selectedItem
 		local data = selected and selected:GetStationData()
 		local record = data and data.record
-		state.lastRadioStation = record and record:Index() or -1
+		game.lastRadioStation = record and record:Index() or -1
 		wrapper()
 	end)
 
@@ -507,7 +643,7 @@ registerForEvent("onInit", function()
 
 	--Registers menu event observers that determine when the music should be muted or stopped.
 	local function muteToggle(self, value)
-		if not type(value) == "boolean" then
+		if type(value) ~= "boolean" then
 			value = self
 		end
 		if value == true then
@@ -556,8 +692,65 @@ registerForEvent("onInit", function()
 	end
 end)
 
---Called every frame to update active timers.
---Processes all running async timers and executes their callbacks when their interval elapses.
+--Detects when the CET overlay is opened.
+registerForEvent("onOverlayOpen", function()
+	overlay.isOpen = true
+end)
+
+--Detects when the CET overlay is closed.
+registerForEvent("onOverlayClose", function()
+	overlay.isOpen = false
+	if audio.isUnsaved then
+		saveDatabase()
+	end
+end)
+
+--Display a simple GUI with some options.
+registerForEvent("onDraw", function()
+	if not overlay.isOpen or not ImGui.Begin("\u{f023c} Synthrace", ImGuiWindowFlags.AlwaysAutoResize) then return end
+
+	local scale = ImGui.GetFontSize() / 18
+	local controlWidth = floor(120 * scale)
+	local heightPadding = 2 * scale
+	ImGui.Dummy(0, heightPadding)
+
+	local sources = getAudioSources()
+	local current = audio.index
+	local preview = sources[current]
+	ImGui.SetNextItemWidth(controlWidth)
+	if ImGui.BeginCombo("Audio Source", preview) then
+		for i, item in ipairs(sources) do
+			local isSelected = current == i
+			if ImGui.Selectable(item, isSelected) and current ~= i then
+				audio.count = -1
+				audio.index = i
+				audio.source = sources[i]
+				audio.isUnsaved = true
+			end
+			if isSelected then
+				ImGui.SetItemDefaultFocus()
+			end
+		end
+		ImGui.EndCombo()
+	end
+	ImGui.Dummy(0, heightPadding)
+
+	ImGui.SetNextItemWidth(controlWidth)
+	local volume, changed = ImGui.InputInt("Audio Volume", audio.volume, 5, 10)
+	if changed then
+		volume = floor(volume)
+		if audio.volume ~= volume then
+			audio.volume = math.max(10, math.min(200, floor(volume)))
+			audio.isUnsaved = true
+		end
+	end
+	ImGui.Dummy(0, heightPadding)
+
+	ImGui.End()
+end)
+
+---Called every frame to update active timers.
+---Processes all running async timers and executes their callbacks when their interval elapses.
 registerForEvent("onUpdate", function(deltaTime)
 	if not async.isActive then return end
 
@@ -574,21 +767,12 @@ registerForEvent("onUpdate", function(deltaTime)
 	end
 end)
 
---Restores all changes upon mod shutdown.
+---Restores all changes upon mod shutdown.
 registerForEvent("onShutdown", reset)
 
---For testing...
---[[
-GetMod("Synthrace").PlayStart(8)
-GetMod("Synthrace").PlayEnd(2)
-GetMod("Synthrace").PlayRandomLoop()
-GetMod("Synthrace").Stop()
-GetMod("Synthrace").Reset()
---]]
-return {
-	PlayStart = function(n) playAudio("RaceStart" .. n, true) end,
-	PlayEnd = function(n) playAudio("RaceEnd" .. n, true) end,
-	PlayRandomLoop = playAudioRandomLoop,
-	Stop = stopAudio,
-	Reset = reset,
-}
+---For testing...
+---@diagnostic disable
+registerHotkey("synthrace1", "DEBUG: Play Random Track on Loop", function() playAudioRandomLoop() end)
+registerHotkey("synthrace2", "DEBUG: Play Race Win Outro", function() playAudio("RaceEnd1", true) end)
+registerHotkey("synthrace3", "DEBUG: Play Race Loss Outro", function() playAudio("RaceEnd2", true) end)
+registerHotkey("synthrace4", "DEBUG: Stop Playback", function() reset() end)

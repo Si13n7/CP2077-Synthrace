@@ -13,13 +13,33 @@ are already provided by Lua or CET and exist
 only for documentation and coding convenience.
 
 Filename: api.lua
-Version: 2025-10-22, 21:13 UTC+01:00 (MEZ)
+Version: 2025-10-23, 20:43 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
 ______________________________________________
 --]]
 
+
+---Provides functions to create graphical user interface elements within the Cyber Engine Tweaks overlay.
+---@class ImGui
+---@field Begin fun(title: string, flags?: integer): boolean # Begins a new ImGui window with optional flags. Must be closed with `ImGui.End()`. Returns true if the window is open and should be rendered.
+---@field End fun() # Ends the creation of the current ImGui window. Must always be called after `ImGui.Begin()`.
+---@field Dummy fun(width: number, height: number) # Creates an invisible element of specified width and height, useful for spacing.
+---@field SameLine fun(offsetX?: number, spacing?: number) # Places the next UI element on the same line. Optionally adds horizontal offset and spacing.
+---@field BeginCombo fun(label: string, previewValue: string, flags?: integer): boolean # Begins a combo box (drop-down list) with a preview value. Returns true if the combo is open and items should be drawn.
+---@field Selectable fun(label: string, selected?: boolean, flags?: integer, sizeX?: number, sizeY?: number): boolean # Creates a selectable item inside a combo or list. Returns true if the item was clicked.
+---@field InputInt fun(label: string, value: integer, step?: integer, stepFast?: integer, flags?: integer): integer, boolean # Creates an integer input field with optional increment and fast increment values. Returns the new value and a boolean indicating whether it was changed. In CET's Lua binding, the return order is reversed (`value, changed`).
+---@field SetItemDefaultFocus fun() # Sets keyboard focus to the most recently added item if no other item is active. Commonly used inside combos or lists.
+---@field EndCombo fun() # Ends the current combo box started with `ImGui.BeginCombo()`.
+---@field SetNextItemWidth fun(width: number) # Sets a fixed width for the next item (e.g., combo box, slider, or text input). Affects layout and alignment.
+---@field GetFontSize fun(): number # Returns the height in pixels of the currently used font. Useful for vertical alignment calculations.
+ImGui = ImGui
+
+---Flags used to configure ImGui window behavior and appearance.
+---@class ImGuiWindowFlags
+---@field AlwaysAutoResize integer # Automatically resizes the window to fit its content each frame.
+ImGuiWindowFlags = ImGuiWindowFlags
 
 ---Bitwise operations (Lua 5.1 compatibility).
 ---@class bit32
@@ -89,6 +109,11 @@ registerForEvent = registerForEvent
 ---@field exec fun(self: db, sql: string): boolean?, string? # Executes a SQL statement. Returns true on success, or nil and an error message.
 ---@field rows fun(self: db, sql: string): fun(): table # Executes a SELECT statement and returns an iterator. Each yielded row is an array (table) of column values.
 db = db
+
+---Scans a directory and returns its contents.
+---@class dir # Not a class — provided by CET.
+---@field dir fun(path: string): table # Returns a list of file/folder entries in the specified directory. Each entry is a table with at least a `name` field.
+dir = dir
 
 ---Provides access to the external RadioExt audio system, used to play and control custom music or sound effects.
 ---@class RadioExt # Another CET mod.
