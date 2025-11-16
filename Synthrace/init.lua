@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: init.lua
-Version: 2025-10-25, 16:56 UTC+01:00 (MEZ)
+Version: 2025-10-26, 14:00 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -28,8 +28,30 @@ Development Environment:
 ---@field Callback fun(id: integer) # The function to be executed when the timer triggers; receives the timer's unique ID.
 ---@field IsActive boolean # True if the timer is currently active, false if paused or canceled.
 
+---Represents the `RadioExt` RED4ext mod interface, providing methods to play and control external audio.
+---@class RadioExt
+---@field SetVolume fun(channel: number, volume: number) # Sets channel volume; returns true on success (if provided), otherwise nil.
+---@field GetSongLength fun(filePath: string): integer # Returns the duration of the specified audio file in milliseconds. The path must point to a valid sound file recognized by RadioExt (e.g., `.ogg`, `.wav`, `.mp3`).
+---@field Stop fun(channel: integer) # Stops playback on the specified channel. Use `-1` to stop all currently playing audio.
+---@field Play fun(channel: integer, filePath: string, priority: integer, volume: number, fadeIn: number) # Plays an audio file on the given channel. `priority` defines playback priority (use `-1` for default). `volume` sets the initial playback volume (1.0 = 100%), and `fadeIn` specifies the fade-in duration in seconds before reaching the target volume.
+
+---Represents the `nativeSettings` CET mod interface used to create and manage custom settings tabs.
+---@class NativeSettings
+---@field pathExists fun(path: string): boolean # Checks whether a given settings path exists in the current UI hierarchy.
+---@field addTab fun(path: string, label: string) # Adds a new main tab to the Native Settings UI with the specified path and label.
+---@field addSubcategory fun(path: string, label: string) # Creates a new subcategory under the given path with the specified label.
+---@field removeSubcategory fun(path: string) # Removes the specified subcategory if it exists.
+---@field addSelectorString fun(path: string, label: string, desc: string, items: string[], value: integer, default: integer, setValue: fun(value: integer)) # Adds a string selector dropdown with a list of options and a callback triggered when a selection is made.
+---@field addRangeInt fun(path: string, label: string, desc: string, min: integer?, max: integer?, step: integer?, value: integer, default: integer, setValue: fun(value: integer)) # Adds an integer slider or range input to the settings UI, with min/max limits and a value change callback.
+---@field addButton fun(path: string, label: string?, desc: string, buttonText: string, textSize: number, callback: fun()) # Adds a button element to the settings UI. `label` is optional and can be nil for unlabeled buttons.
+---@field currentTab string # The path of the currently opened tab, or an empty string if none is active.
+
+---Represents the `CyberTrials` CET mod interface, exposing its runtime state.
+---@class CyberTrials
+---@field raceActive boolean # Indicates whether a CyberTrials race event is currently active.
+
 --Aliases for commonly used standard library functions to simplify code.
-local format, concat, insert, unpack, abs, floor, random, randomseed, bxor =
+local format, concat, insert, unpack, abs, floor, random, randomseed =
 	string.format,
 	table.concat,
 	table.insert,
@@ -37,8 +59,7 @@ local format, concat, insert, unpack, abs, floor, random, randomseed, bxor =
 	math.abs,
 	math.floor,
 	math.random,
-	math.randomseed,
-	bit32.bxor
+	math.randomseed
 
 ---Loads all visible static string constants from `text.lua` into the global `Text` table.
 ---This is the most efficient way to manage display strings separately from logic and code.
@@ -61,8 +82,8 @@ local audio = {
 	---True if a looping track sequence is active.
 	isLoopActive = false,
 
-	---Async timer ID of the currently running loop.
-	currentLoopId = -1,
+	---Prevents the active audio track from being stopped during certain transitions, such as scene changes.
+	isProtected = false,
 
 	---Index of the last randomly played track to avoid repetition.
 	lastLoopIndex = -1,
@@ -79,6 +100,9 @@ local audio = {
 	---List of available audio source folder names.
 	---@type string[]
 	sources = {},
+
+	---Determines whether the custom audio playback is currently muted without being stopped.
+	isMuted = false,
 
 	---Global audio volume level (range 10–200).
 	volume = 70,
@@ -115,8 +139,20 @@ local async = {
 	isActive = false
 }
 
----Reference to the loaded `nativeSettings` mod instance, or nil if unavailable.
-local native = nil
+---Stores references to external mods for extended functionality.
+local refs = {
+	---Reference to the `RadioExt` RED4ext mod instance, which is required for this mod to function.
+	---@type RadioExt
+	radioExt = nil,
+
+	---Reference to the `Native Settings UI` CET mod instance, which is optional and only used if available.
+	---@type NativeSettings
+	nativeSettings = nil,
+
+	---Reference to the `CyberTrials` CET mod instance, which is optional and only used if available.
+	---@type CyberTrials
+	cyberTrials = nil
+}
 
 ---Writes a formatted log message to the CET console with a specified log level prefix.
 ---@param lvl string # Log level label (e.g. "Info", "Warning", "Error").
@@ -124,8 +160,8 @@ local native = nil
 ---@param ... any # Optional arguments to be formatted into the message.
 local function log(lvl, fmt, ...)
 	if not lvl or not fmt then return end
-	local prefix = format("[%s]  [%s]  ", Text.GUI_NAME, lvl)
-	print(select("#", ...) and format(prefix .. fmt, ...) or fmt)
+	local pfx = format("[%s]  [%s]  ", Text.GUI_NAME, lvl)
+	print(select("#", ...) and format(pfx .. fmt, ...) or fmt)
 end
 
 ---Logs an error message to the CET console.
@@ -156,6 +192,15 @@ local function asyncStop(id)
 	if not id or id < 0 then return end
 	async.timers[id] = nil
 	async.isActive = next(async.timers) ~= nil
+end
+
+---Stops and removes all active async timers.
+local function asyncStopAll()
+	if not async.isActive then return end
+	for id in pairs(async.timers) do
+		async.timers[id] = nil
+	end
+	async.isActive = false
 end
 
 ---Creates a recurring async timer that executes a callback every `interval` seconds.
@@ -513,20 +558,22 @@ end
 local function getAudioDuration(name)
 	if not name then return 0 end
 	local path = getAudioPath(name)
-	local length = RadioExt.GetSongLength(path)
+	local length = refs.radioExt.GetSongLength(path)
 	return floor((length or 0) / 1000)
 end
 
 ---Mutes the currently playing custom audio without stopping it.
 local function muteAudio()
-	if not audio.isPlaying then return end
-	RadioExt.SetVolume(-1, 0)
+	if not audio.isPlaying or audio.isMuted then return end
+	audio.isMuted = true
+	refs.radioExt.SetVolume(-1, 0)
 end
 
 ---Restores volume for the currently playing custom audio.
 local function unmuteAudio()
-	if not audio.isPlaying or audio.volume < 0 then return end
-	RadioExt.SetVolume(-1, audio.volume / 100)
+	if not audio.isPlaying or not audio.isMuted or audio.volume < 0 then return end
+	audio.isMuted = false
+	refs.radioExt.SetVolume(-1, audio.volume / 100)
 end
 
 ---Completely stops the currently playing custom audio and resets state.
@@ -535,11 +582,11 @@ local function stopAudio()
 
 	audio.isPlaying = false
 	audio.isLoopActive = false
+	audio.isProtected = false
 
-	asyncStop(audio.currentLoopId)
-	audio.currentLoopId = -1
+	asyncStopAll()
 
-	RadioExt.Stop(-1)
+	refs.radioExt.Stop(-1)
 
 	restoreGlobalVolume()
 end
@@ -558,12 +605,13 @@ local function playAudio(name, doRestore)
 	muteGlobalVolume()
 
 	local path = getAudioPath(name)
-	RadioExt.Play(-1, path, -1, volume, 0)
+	refs.radioExt.Play(-1, path, -1, audio.isMuted and 0 or volume, 0)
 
 	if not doRestore then return end
 
 	local delay = getAudioDuration(name)
 	asyncOnce(delay, function()
+		audio.isProtected = false
 		restoreGlobalVolume()
 	end)
 end
@@ -586,7 +634,7 @@ local function playAudioRandomLoop()
 	if delay <= 1 then return end
 
 	audio.isLoopActive = true
-	audio.currentLoopId = asyncRepeat(delay, function()
+	asyncRepeat(delay, function()
 		if not audio.isLoopActive then return end
 		playAudioRandomLoop()
 	end)
@@ -599,11 +647,17 @@ local function reset()
 	restoreGlobalVolume()
 end
 
+---Checks whether the player is currently seated in a vehicle and occupying the driver seat.
+---@return boolean # True if the player exists, is mounted in a vehicle, and is the driver; otherwise false.
+local function isVehicleDriver()
+	local player = Game.GetPlayer()
+	return player and Game.GetMountedVehicle(player) and Game.IsDriver(player)
+end
+
 ---Initializes and registers all mod settings within the Native Settings UI.
 local function createNativeMenu()
-	local instance = native or GetMod("nativeSettings")
+	local instance = refs.nativeSettings
 	if not instance then return end
-	native = instance
 
 	local tab = "/Synthrace"
 	if not instance.pathExists(tab) then
@@ -632,11 +686,11 @@ local function createNativeMenu()
 	---@param section string # The subcategory where the option appears in the Settings UI.
 	---@param label string # Display name shown in the settings UI.
 	---@param desc string # Description text.
-	---@param default number|boolean # Default value for the option.
-	---@param value number|boolean # Current value of the option.
-	---@param min number? # Minimum numeric value (for sliders).
-	---@param max number? # Maximum numeric value (for sliders).
-	---@param speed number? # Step size for numeric options; fractional speeds imply float sliders.
+	---@param default any # Default value for the option.
+	---@param value any # Current value of the option.
+	---@param min integer? # Minimum numeric value (for sliders).
+	---@param max integer? # Maximum numeric value (for sliders).
+	---@param speed integer? # Step size for numeric options; fractional speeds imply float sliders.
 	---@param list string[]? # Optional list of selectable string values.
 	---@param setValue function # Callback used when the value changes.
 	local function addOption(section, label, desc, default, value, min, max, speed, list, setValue)
@@ -721,13 +775,15 @@ registerForEvent("onInit", function()
 		if file then file:close() end
 	end)
 
-	--RadioExt dependencies.
-	if type(RadioExt) ~= "userdata" then
-		logWarn(Text.LOG_EXT_NOT_FOUND)
+	--Handle hard dependency.
+	---@diagnostic disable-next-line: undefined-global
+	refs.radioExt = RadioExt
+	if type(refs.radioExt) ~= "userdata" then
+		logWarn(Text.LOG_MOD_DISABLED)
 		return
 	end
 
-	---Initializes the random number generator with a mixed seed based on system time and CPU clock.
+	---Initializes the random number generator with a mixed seed based on CPU clock.
 	---Ensures more varied randomness across CET sessions.
 	randomseed(os.clock())
 
@@ -749,18 +805,28 @@ registerForEvent("onInit", function()
 
 	--Observes race UI events to control custom race music playback.
 	Observe("hudCarRaceController", "OnForwardVehicleRaceUIEvent", function(_, event)
-		if not event or not event.mode then return end
-		if event.mode == vehicleRaceUI.RaceStart then
+		local mode = event and event.mode
+		if not mode then return end
+		if not isVehicleDriver() then
+			stopAudio()
+			return
+		end
+		if mode == vehicleRaceUI.RaceStart then
 			playAudioRandomLoop()
 			logInfo(Text.LOG_RACE_STARTED)
-		elseif event.mode == vehicleRaceUI.RaceEnd then
+		elseif mode == vehicleRaceUI.RaceEnd then
 			local position = tonumber(Game.GetQuestsSystem():GetFactStr("sq024_current_race_player_position")) or 0
 			if position > 1 then
 				playAudio("RaceEnd2", true)
 			else
 				playAudio("RaceEnd1", true)
 			end
-			logInfo(Text.LOG_RACE_ENDED, position)
+			if refs.cyberTrials.raceActive then
+				audio.isProtected = true
+				logInfo(Text.LOG_RACE_ENDED)
+			else
+				logInfo(Text.LOG_RACE_FINISHED, position)
+			end
 		end
 	end)
 
@@ -809,13 +875,33 @@ registerForEvent("onInit", function()
 		for event, scenarios in pairs(events) do
 			scenarios = type(scenarios) == "table" and scenarios or { scenarios }
 			for _, scenario in ipairs(scenarios) do
-				Observe(scenario, event, handler)
+				Observe(scenario, event, function()
+					if audio.isProtected and event == "SetProgress" then
+						return
+					end
+					handler()
+				end)
 			end
 		end
 	end
 
-	--Initializes the Native Settings UI addon.
-	asyncOnce(3, createNativeMenu)
+	--Handle optional dependencies.
+	asyncOnce(2, function()
+		local native = GetMod("nativeSettings")
+		if type(native) == "table" then
+			refs.nativeSettings = native
+			logInfo(Text.LOG_DEP_REFERENCED, "Native Settings UI")
+			createNativeMenu()
+		end
+
+		local trials = GetMod("CyberTrials")
+		if type(trials) == "table" then
+			refs.cyberTrials = trials
+			logInfo(Text.LOG_DEP_REFERENCED, "Cyber Trials")
+		else
+			refs.cyberTrials = { raceActive = false }
+		end
+	end)
 end)
 
 --Detects when the CET overlay is opened.
@@ -826,11 +912,12 @@ end)
 --Detects when the CET overlay is closed.
 registerForEvent("onOverlayClose", function()
 	overlay.isOpen = false
-	if audio.isUnsaved then
-		saveDatabase()
-		if native then
-			createNativeMenu()
-		end
+
+	if not audio.isUnsaved then return end
+
+	saveDatabase()
+	if refs.nativeSettings then
+		createNativeMenu()
 	end
 end)
 

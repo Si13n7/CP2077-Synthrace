@@ -13,7 +13,7 @@ are already provided by Lua or CET and exist
 only for documentation and coding convenience.
 
 Filename: api.lua
-Version: 2025-10-25, 16:20 UTC+01:00 (MEZ)
+Version: 2025-10-26, 14:00 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -87,6 +87,9 @@ bit32 = bit32
 ---@class Game
 ---@field GetQuestsSystem fun(): QuestsSystem # Retrieves the Quests System, used for getting and setting quest facts.
 ---@field GetSettingsSystem fun(): SettingsSystem # Provides access to the global settings system used to query and modify game options.
+---@field GetPlayer fun(): any # Retrieves the current player instance if available.
+---@field GetMountedVehicle fun(player: any): any # Returns the vehicle the player is currently mounted in, if any.
+---@field IsDriver fun(player: any): boolean # True if the player is driving a vehicle; otherwise, false.
 Game = Game
 
 ---Represents available vehicle race UI events used to trigger race-related overlays or effects.
@@ -130,11 +133,3 @@ db = db
 ---@class dir # Not a class — provided by CET.
 ---@field dir fun(path: string): table # Returns a list of file/folder entries in the specified directory. Each entry is a table with at least a `name` field.
 dir = dir
-
----Provides access to the external RadioExt audio system, used to play and control custom music or sound effects.
----@class RadioExt # Another CET mod.
----@field SetVolume fun(channel: number, volume: number) # Sets channel volume; returns true on success (if provided), otherwise nil.
----@field GetSongLength fun(filePath: string): integer # Returns the duration of the specified audio file in milliseconds. The path must point to a valid sound file recognized by RadioExt (e.g., `.ogg`, `.wav`, `.mp3`).
----@field Stop fun(channel: integer) # Stops playback on the specified channel. Use `-1` to stop all currently playing audio.
----@field Play fun(channel: integer, filePath: string, priority: integer, volume: number, fadeIn: number) # Plays an audio file on the given channel. `priority` defines playback priority (use `-1` for default). `volume` sets the initial playback volume (1.0 = 100%), and `fadeIn` specifies the fade-in duration in seconds before reaching the target volume.
-RadioExt = RadioExt
