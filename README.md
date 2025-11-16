@@ -121,16 +121,16 @@ Synthrace/
 
 ## ✔ Requirements
 
-- Cyberpunk 2077 **2.21+**
-- Cyber Engine Tweaks **1.35+**
-- **RadioExt** (required — provides the audio player)
+- [Cyberpunk 2077](https://www.gog.com/de/game/cyberpunk_2077) **2.21+**
+- [Cyber Engine Tweaks](https://github.com/maximegmd/CyberEngineTweaks) **1.35+**
+- [RadioExt](https://github.com/justarandomguyintheinternet/CP77_radioExt) (required — provides the audio player)
 
 ---
 
 ## 🎵 Music Credits
 
 The tracks featured in this mod include works from the following artists:
-- [Patrick Phelan](https://en.wikipedia.org/wiki/Lotus_III%3A_The_Ultimate_Challenge)
+- [Patrick Phelan](https://en.wikipedia.org/wiki/Patrick_Phelan_(composer))
 - [Hugo Lopes](https://www.youtube.com/@HugoLopesGuitar)
 - [Arcade Music Tribute](https://www.youtube.com/@ArcadeMusicTribute)
 
