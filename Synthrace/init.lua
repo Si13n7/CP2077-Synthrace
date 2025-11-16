@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: init.lua
-Version: 2025-10-24, 22:12 UTC+01:00 (MEZ)
+Version: 2025-10-25, 16:56 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -87,14 +87,8 @@ local audio = {
 	isUnsaved = false
 }
 
----Contains runtime data related to in-game systems such as radio and audio channels.
+---Contains runtime data related to in-game systems.
 local game = {
-	---Prevents instant reactivation of the last in-game radio station.
-	isRadioProtected = false,
-
-	---Index of the last active in-game radio station for later restoration.
-	lastRadioStation = -1,
-
 	---Stores the original in-game audio channel volumes before custom playback overrides them.
 	---Used to restore the game's volume mix after mod playback stops.
 	---@type table<string, number>
@@ -347,13 +341,6 @@ local function saveDatabase(backup)
 	sqliteCommit()
 end
 
----Retrieves the player's QuickSlotsManager instance, if available.
----@return QuickSlotsManager? # The active QuickSlotsManager or nil if unavailable.
-local function getQuickSlotsManager()
-	local player = Game.GetPlayer()
-	return player and player:GetQuickSlotsManager() or nil
-end
-
 ---Retrieves a configuration variable handle from the game's audio settings group.
 ---@param option string # The option key, e.g., "MusicVolume".
 ---@return ConfigVar? # The associated variable handle or nil if not found.
@@ -397,25 +384,6 @@ local function restoreGlobalVolume()
 		::continue::
 	end
 	saveDatabase(true)
-end
-
----Stops any active in-game radio playback.
-local function stopRadio()
-	local manager = getQuickSlotsManager()
-	if manager then
-		game.isRadioProtected = true
-		manager:SendRadioEvent(false, false, game.lastRadioStation)
-	end
-end
-
----Resumes the previously active in-game radio station.
-local function resumeRadio()
-	if game.lastRadioStation < 0 then return end
-
-	local manager = getQuickSlotsManager()
-	if manager then
-		manager:SendRadioEvent(true, true, game.lastRadioStation)
-	end
 end
 
 ---Returns the base directory for all audio sources.
@@ -576,14 +544,13 @@ local function stopAudio()
 	restoreGlobalVolume()
 end
 
----Plays the specified audio file once, optionally restoring radio and volume afterward.
+---Plays the specified audio file once, optionally restoring global volume afterward.
 ---@param name string # The song name without extension.
----@param doRestore boolean? # If true, restores radio and volume after playback finishes.
+---@param doRestore boolean? # If true, restores global volume after playback finishes.
 local function playAudio(name, doRestore)
 	if not name then return end
 
 	stopAudio()
-	stopRadio()
 
 	audio.isPlaying = true
 
@@ -597,7 +564,6 @@ local function playAudio(name, doRestore)
 
 	local delay = getAudioDuration(name)
 	asyncOnce(delay, function()
-		resumeRadio()
 		restoreGlobalVolume()
 	end)
 end
@@ -627,10 +593,9 @@ local function playAudioRandomLoop()
 end
 
 ---Stops all custom playback and restores the previous in-game audio state.
----Resets radio and global volume to their original values.
+---Resets global volume to their original values.
 local function reset()
 	stopAudio()
-	resumeRadio()
 	restoreGlobalVolume()
 end
 
@@ -709,12 +674,14 @@ local function createNativeMenu()
 		end
 	)
 
-	instance.addButton(cat, nil, Text.GUI_REFRESH_TIP, Text.GUI_REFRESH, 40, function()
-		audio.count = -1
-		audio.index = 1
-		audio.sources = {}
-		createNativeMenu()
-	end)
+	instance.addButton(cat, nil, Text.GUI_REFRESH_TIP, Text.GUI_REFRESH, 40,
+		function()
+			audio.count = -1
+			audio.index = 1
+			audio.sources = {}
+			createNativeMenu()
+		end
+	)
 
 	addOption(cat, Text.GUI_VOLUME, Text.GUI_VOLUME_TIP, 70, audio.volume, 10, 200, 1, nil,
 		function(value)
@@ -762,7 +729,7 @@ registerForEvent("onInit", function()
 
 	---Initializes the random number generator with a mixed seed based on system time and CPU clock.
 	---Ensures more varied randomness across CET sessions.
-	randomseed(bxor(os.time() * 0xf4243, math.floor(os.clock() * 1e6)) % 0x7fffffff)
+	randomseed(os.clock())
 
 	--If the game crashed for any reason, this ensures that all
 	--changes made by this mod are reverted on the next startup.
@@ -780,30 +747,20 @@ registerForEvent("onInit", function()
 		audio.source = "#Default"
 	end
 
-	--Overrides the activation behavior of the vehicle radio menu to track the last selected radio station.
-	Override("VehicleRadioPopupGameController", "Activate", function(self, wrapper)
-		if game.isRadioProtected then
-			game.isRadioProtected = false
-			return
-		end
-		local selected = self.selectedItem
-		local data = selected and selected:GetStationData()
-		local record = data and data.record
-		game.lastRadioStation = record and record:Index() or -1
-		wrapper()
-	end)
-
 	--Observes race UI events to control custom race music playback.
 	Observe("hudCarRaceController", "OnForwardVehicleRaceUIEvent", function(_, event)
 		if not event or not event.mode then return end
 		if event.mode == vehicleRaceUI.RaceStart then
 			playAudioRandomLoop()
+			logInfo(Text.LOG_RACE_STARTED)
 		elseif event.mode == vehicleRaceUI.RaceEnd then
-			if Game.GetQuestsSystem():GetFactStr("sq024_current_race_player_position") > 1 then
+			local position = tonumber(Game.GetQuestsSystem():GetFactStr("sq024_current_race_player_position")) or 0
+			if position > 1 then
 				playAudio("RaceEnd2", true)
 			else
 				playAudio("RaceEnd1", true)
 			end
+			logInfo(Text.LOG_RACE_ENDED, position)
 		end
 	end)
 
@@ -962,9 +919,24 @@ end)
 ---Restores all changes upon mod shutdown.
 registerForEvent("onShutdown", reset)
 
----For testing...
----@diagnostic disable
-registerHotkey("synthrace1", "DEBUG: Play Random Track on Loop", function() playAudioRandomLoop() end)
-registerHotkey("synthrace2", "DEBUG: Play Race Win Outro", function() playAudio("RaceEnd1", true) end)
-registerHotkey("synthrace3", "DEBUG: Play Race Loss Outro", function() playAudio("RaceEnd2", true) end)
-registerHotkey("synthrace4", "DEBUG: Stop Playback", function() reset() end)
+---Hotkey that skips to the next random track.
+registerHotkey("synthraceNextHotkey", Text.HK_NEXT, function()
+	if audio.isLoopActive then
+		playAudioRandomLoop()
+	end
+end)
+
+---Input binding that plays the next random track when the assigned key is released.
+registerInput("synthraceNextInput", Text.HK_NEXT, function(down)
+	if not down and audio.isLoopActive then
+		playAudioRandomLoop()
+	end
+end)
+
+---Hotkey that stops all playback and restores the previous game audio state.
+registerHotkey("synthraceStopHotkey", Text.HK_STOP, reset)
+
+---Input binding that stops all playback and restores game audio when the assigned key is released.
+registerInput("synthraceStopInput", Text.HK_STOP, function(down)
+	if not down then reset() end
+end)

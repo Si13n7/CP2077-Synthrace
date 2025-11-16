@@ -13,7 +13,7 @@ are already provided by Lua or CET and exist
 only for documentation and coding convenience.
 
 Filename: api.lua
-Version: 2025-10-24, 22:01 UTC+01:00 (MEZ)
+Version: 2025-10-25, 16:20 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -61,14 +61,6 @@ ImGuiWindowFlags = ImGuiWindowFlags
 ---@field bxor fun(...: integer): integer # Returns the bitwise XOR (exclusive OR) of all given integer arguments.
 bit32 = bit32
 
----Handles the player's quick slot system, including equipped items, cyberware shortcuts, and radio controls.
----@class QuickSlotsManager
----@field SendRadioEvent fun(self: QuickSlotsManager, toggle: boolean, setStation: boolean, stationIndex: integer) # Sends a radio control event. `toggle` enables or disables the radio, `setStation` defines whether to change the current station, and `stationIndex` selects the station when `setStation` is true.
-
----Represents the player character in the game, providing functions to interact with the player instance.
----@class Player
----@field GetQuickSlotsManager fun(): QuickSlotsManager # Returns the player's quick slots manager, which handles equipped items, gadgets, and quick access slots. Used to query or modify quick slot states.
-
 ---Provides functions to interact with quest-related data, including reading and modifying facts.
 ---@class QuestsSystem
 ---@field GetFactStr fun(self: QuestsSystem, fact: string): number? # Retrieves the value of a specified fact. Returns nil if not found.
@@ -93,7 +85,6 @@ bit32 = bit32
 
 ---Provides various global game functions, such as getting the player, mounted vehicles, and converting names to strings.
 ---@class Game
----@field GetPlayer fun(): Player? # Retrieves the current player instance if available.
 ---@field GetQuestsSystem fun(): QuestsSystem # Retrieves the Quests System, used for getting and setting quest facts.
 ---@field GetSettingsSystem fun(): SettingsSystem # Provides access to the global settings system used to query and modify game options.
 Game = Game
@@ -109,11 +100,6 @@ vehicleRaceUI = vehicleRaceUI
 ---@field GetMod fun(name: string): table? # Returns the mod object if found, or `nil` if the mod is not loaded.
 GetMod = GetMod
 
----Provides functionality to replace or modify existing game functions at runtime.
----@class Override # Not a class — provided by CET.
----@field Override fun(className: string, functionName: string, callback: fun(self: any, wrapper: fun(...): any, ...)) # Replaces the specified game function. The callback receives the instance (`self`) and the original function (`wrapper`), which can be called manually to preserve original behavior.
-Override = Override
-
 ---Provides functionality to observe game events, allowing custom functions to be executed when certain events occur.
 ---@class Observe # Not a class — provided by CET.
 ---@field Observe fun(className: string, functionName: string, callback: fun(...)) # Sets up an observer for a specified function within the game.
@@ -123,6 +109,16 @@ Observe = Observe
 ---@class registerForEvent # Not a class — provided by CET.
 ---@field registerForEvent fun(eventName: string, callback: fun(...)) # Registers a callback function for a specified event (e.g., `onInit`, `onIsDefault`).
 registerForEvent = registerForEvent
+
+---Allows the registration of custom keyboard shortcuts that trigger specific Lua functions.
+---@class registerHotkey # Not a class — provided by CET.
+---@field registerHotkey fun(id: string, label: string, callback: fun()) # Registers a hotkey with a unique identifier, a descriptive label shown in CET's Hotkey menu, and a callback function to execute when pressed.
+registerHotkey = registerHotkey
+
+---Allows the registration of input bindings that respond to key press and release events.
+---@class registerInput # Not a class — provided by CET.
+---@field registerInput fun(id: string, label: string, callback: fun(down: boolean)) # Registers an input action with a unique identifier, a descriptive label for CET’s Input menu, and a callback function that receives `true` on key press and `false` on key release.
+registerInput = registerInput
 
 ---SQLite database handle.
 ---@class db # Not a class — provided by CET.
