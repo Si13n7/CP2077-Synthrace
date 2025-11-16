@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: text.lua
-Version: 2025-10-26, 14:00 UTC+01:00 (MEZ)
+Version: 2025-10-30, 03:30 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -40,9 +40,10 @@ return {
 
 	--LOG: ⚠️ Warnings
 	LOG_MOD_DISABLED = "Hard dependency 'RadioExt' not found - mod has been disabled!",
+	LOG_SOURCE_MISSING = "Source '%s' is missing.",
 
 	--LOG: ❌ Errors
 	LOG_FOLDER_INVALID = "Folder name '%s' uses an unsupported format.",
-	LOG_FILE_MISSING = "File '%s.mp3' is missing in folder '%s'.",
-	LOG_FILE_NOT_FOUND = "No file named '%s' found."
+	LOG_PLAYLIST_INVALID = "The current playlist is invalid.",
+	LOG_SOURCE_INVALID = "Source '%s' is invalid."
 }

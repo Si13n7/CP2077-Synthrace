@@ -6,7 +6,7 @@ This file is distributed under the MIT License
 Synthrace - Race Music Overhaul
 
 Filename: init.lua
-Version: 2025-10-28, 12:32 UTC+01:00 (MEZ)
+Version: 2025-10-30, 03:30 UTC+01:00 (MEZ)
 
 Copyright (c) 2025, Si13n7 Developments(tm)
 All rights reserved.
@@ -30,10 +30,10 @@ Development Environment:
 
 ---Represents the `RadioExt` RED4ext mod interface, providing methods to play and control external audio.
 ---@class RadioExt
----@field SetVolume fun(channel: number, volume: number) # Sets channel volume; returns true on success (if provided), otherwise nil.
----@field GetSongLength fun(filePath: string): integer # Returns the duration of the specified audio file in milliseconds. The path must point to a valid sound file recognized by RadioExt (e.g., `.ogg`, `.wav`, `.mp3`).
+---@field SetVolume fun(channel: number, volume: number) # Sets the volume of a specific channel; returns true on success (if provided), otherwise nil.
+---@field GetSongLength fun(filePath: string): integer # Returns the duration of the specified audio file in milliseconds. Supported formats include: `.mp3`, `.mp2`, `.flac`, `.ogg`, `.wav`, `.wax`, `.wma`, `.opus`, `.aiff`, `.aif`, and `.aifc`.
 ---@field Stop fun(channel: integer) # Stops playback on the specified channel. Use `-1` to stop all currently playing audio.
----@field Play fun(channel: integer, filePath: string, priority: integer, volume: number, fadeIn: number) # Plays an audio file on the given channel. `priority` defines playback priority (use `-1` for default). `volume` sets the initial playback volume (1.0 = 100%), and `fadeIn` specifies the fade-in duration in seconds before reaching the target volume.
+---@field Play fun(channel: integer, filePath: string, time: integer, volume: number, fadeIn: number) # Plays an audio file on the given channel. `time` defines the playback start position in milliseconds; use `-1` to open the file as a stream instead of preloading it. `volume` sets the initial playback volume (1.0 = 100%), and `fadeIn` specifies the fade-in duration in seconds before reaching the target volume.
 
 ---Represents the `nativeSettings` CET mod interface used to create and manage custom settings tabs.
 ---@class NativeSettings
@@ -88,9 +88,6 @@ local audio = {
 	---Index of the last randomly played track to avoid repetition.
 	lastLoopIndex = -1,
 
-	---Number of valid `RaceStart` tracks in the current audio source. Automatically recalculated when set below 0.
-	count = -1,
-
 	---Index of the currently selected audio source.
 	index = 1,
 
@@ -100,6 +97,10 @@ local audio = {
 	---List of available audio source folder names.
 	---@type string[]
 	sources = {},
+
+	---Active audio playlist containing song and outro file paths for the current source.
+	---@type { songs: string[], outros: string[] }
+	playlist = {},
 
 	---Determines whether the custom audio playback is currently muted without being stopped.
 	isMuted = false,
@@ -155,22 +156,71 @@ local refs = {
 }
 
 ---Safely retrieves a nested value from a table (e.g., table[one][two][three]).
----Returns a default value if any level is missing or invalid.
+---Returns a nil if any level is missing or invalid.
 ---@param t table # The root table to access.
----@param fallback any # The fallback value if the lookup fails.
 ---@param ... any # One or more keys representing the path.
 ---@return any # The nested value if it exists, or the default value.
-local function get(t, fallback, ...)
-	if type(t) ~= "table" then return fallback end
+local function get(t, ...)
+	if type(t) ~= "table" then return nil end
 	local v = t
 	for i = 1, select("#", ...) do
 		local k = select(i, ...)
 		if type(v) ~= "table" or k == nil then
-			return fallback
+			return nil
 		end
 		v = rawget(v, k)
 	end
-	return v == nil and fallback or v
+	return v ~= nil and v or nil
+end
+
+---Checks if a string starts or ends with a given affix.
+---@param s string # The string to check.
+---@param v string # The prefix or suffix to match.
+---@param atEnd boolean # If true, checks suffix (ends with); if false, checks prefix (starts with).
+---@param caseInsensitive boolean? # If true, ignores case when comparing.
+---@return boolean # True if the condition is met, false otherwise.
+local function hasAffix(s, v, atEnd, caseInsensitive)
+	if not s or not v then return false end
+	s, v = tostring(s), tostring(v)
+	if caseInsensitive then
+		s = s:lower()
+		v = v:lower()
+	end
+	local len = #v
+	if #s == len then return s == v end
+	if #s < len then return false end
+	return (atEnd and s:sub(-len) or s:sub(1, len)) == v
+end
+
+---Checks if a string starts with a given prefix.
+---@param s string # The string to check.
+---@param v string # The prefix to match.
+---@param caseInsensitive boolean? # True if string comparisons ignore letter case.
+---@return boolean # True if `s` starts with `v`, false otherwise.
+local function startsWith(s, v, caseInsensitive)
+	return hasAffix(s, v, false, caseInsensitive)
+end
+
+---Extracts the file extension from a given file path in a safe and cross-platform way.
+---Supports both Windows (`\`) and Unix (`/`) path separators and ignores dots in folder names.
+---@param path string # The file path to extract the extension from.
+---@return string? # The lowercase file extension, or nil if none exists or input is invalid.
+local function getFileExtension(path)
+	if type(path) ~= "string" or #path < 1 then return nil end
+	local ext = path:match("^.+%.([^/\\%.]+)$")
+	return ext and ext:lower() or nil
+end
+
+---Reads the full content of a file and returns it as a string.
+---@param path string # The path to the file to read.
+---@return string? # The file content as a string, or nil if the file could not be read.
+local function getFileContent(path)
+	if type(path) ~= "string" or #path < 1 then return nil end
+	local file = io.open(path, "r")
+	if not file then return nil end
+	local content = file:read("*a")
+	file:close()
+	return content
 end
 
 ---Writes a formatted log message to the CET console with a specified log level prefix.
@@ -450,11 +500,17 @@ local function restoreGlobalVolume()
 	saveDatabase(true)
 end
 
+---Returns the absolute path to the Cyber Engine Tweaks mods directory.
+---@return string # The CET mods directory path.
+local function getCetModsDir()
+	return "plugins\\cyber_engine_tweaks\\mods"
+end
+
 ---Returns the base directory for all audio sources.
 ---@param isCetHome boolean? # If true, returns the CET-relative `music` path; otherwise returns the absolute mod path.
 ---@return string # Path to the audio base directory.
 local function getAudioBaseDir(isCetHome)
-	return isCetHome and "music" or "plugins\\cyber_engine_tweaks\\mods\\Synthrace\\music"
+	return isCetHome and "music" or (getCetModsDir() .. "\\Synthrace\\music")
 end
 
 ---Builds the path to a specific audio source folder.
@@ -466,28 +522,24 @@ local function getAudioSourceDir(isCetHome, source)
 end
 
 ---Builds the full file path for a given audio track.
----@param name string # Base filename without extension.
----@param isCetHome boolean? # If true, returns a CET-relative path; otherwise the full absolute path.
+---@param name string # Base filename with extension.
 ---@param source string? # Source folder name. If nil, the current active audio source is used.
----@return string # The full path to the MP3 file, or an empty string if the name is invalid.
-local function getAudioPath(name, isCetHome, source)
+---@return string # The full path to the audio file, or an empty string if the name is invalid.
+local function getAudioPath(name, source)
 	if not name then return "" end
-	return format("%s\\%s.mp3", getAudioSourceDir(isCetHome, source), name)
+	return format("%s\\%s", getAudioSourceDir(false, source), name)
 end
 
----Checks whether a music file with the given name exists in the `music` directory.
----@param name string # The base filename (without path or extension).
----@param source string? # Source folder name. If nil, the current active audio source is used.
----@return boolean # True if the corresponding MP3 file exists, false otherwise.
+---Checks whether a given audio file exists.
+---Uses `RadioExt.GetSongLength()` to verify if the file can be opened and decoded successfully.
+---@param name string # The audio file name or path to check.
+---@param source string? # Optional source directory or identifier used to resolve the full audio path.
+---@return boolean # True if the file exists and is a valid audio file, false otherwise.
 local function audioFileExists(name, source)
 	if not name then return false end
-	local path = getAudioPath(name, true, source)
-	local handle = io.open(path, "r")
-	if handle then
-		handle:close()
-		return true
-	end
-	return false
+	local path = source and getAudioPath(name, source) or name
+	local time = refs.radioExt.GetSongLength(path)
+	return type(time) == "number" and time > 0
 end
 
 ---Retrieves and validates available audio source folders.
@@ -506,21 +558,36 @@ local function getAudioSources()
 			goto continue
 		end
 
-		local isValid = true
-		for _, prefix in ipairs({ "RaceEnd", "RaceStart" }) do
-			for i = 1, 2 do
-				local name = prefix .. i
-				if not audioFileExists(name, source) then
-					isValid = false
-					logErr(Text.LOG_FILE_MISSING, name, source)
+		local isValid = false
+
+		if getFileExtension(source) == "json" then
+			local content = getFileContent(getAudioSourceDir(true, source))
+			local playlist = content and json.decode(content)
+			if type(playlist) == "table" and next(playlist) then
+				local song = get(playlist, "songs", 1)
+				local path = song and format("%s\\%s", getCetModsDir(), song)
+				if audioFileExists(path) then
+					local kind = getFileExtension(song)
+					isValid = kind == "mp3" or kind == "ogg"
+				end
+			end
+		else
+			local files = dir(getAudioSourceDir(true, source))
+			for _, file in ipairs(files) do
+				local name = file.name
+				local kind = getFileExtension(name)
+				if kind == "mp3" or kind == "ogg" then
+					isValid = true
 					break
 				end
 			end
-			if not isValid then break end
 		end
+
 		if isValid then
 			insert(sources, source)
 			logInfo(Text.LOG_FOLDER_ADDED, source)
+		else
+			logErr(Text.LOG_SOURCE_INVALID, source)
 		end
 
 		::continue::
@@ -530,55 +597,101 @@ local function getAudioSources()
 	return sources
 end
 
+---Builds an audio playlist from either a JSON file or a directory structure.
+---If a JSON file is provided, it loads the defined `songs` and optional `outros` lists.
+---If a directory is provided, it scans for playable audio files and automatically separates songs and outros.
+---Missing outro files are replaced with the default ones from `#Default`.
+---@param source string? # Optional name of the audio source to look up. Defaults to `audio.source` if not specified.
+---@return table<string, string[]> # A table containing two arrays: `songs` (main playlist) and `outros` (outro tracks).
+local function getAudioPlaylist(source)
+	source = source or audio.source
+	if not source then return {} end
+
+	local list = {
+		songs = {},
+		outros = {}
+	}
+
+	if getFileExtension(source) == "json" then
+		local content = getFileContent(getAudioSourceDir(true, source))
+		local playlist = content and json.decode(content)
+		if type(playlist) == "table" then
+			for _, key in ipairs({ "songs", "outros" }) do
+				local entries = get(playlist, key) or {}
+				for _, song in ipairs(entries) do
+					local path = song and format("%s\\%s", getCetModsDir(), song)
+					if audioFileExists(path) then
+						insert(list[key], path)
+					end
+				end
+			end
+		end
+	else
+		local files = dir(getAudioSourceDir(true, source))
+		for _, file in ipairs(files) do
+			local name = file.name
+			if audioFileExists(name, source) then
+				local isOutro = startsWith(name, "RaceEnd", true)
+				local path = getAudioPath(name, source)
+				insert(isOutro and list.outros or list.songs, path)
+			end
+		end
+	end
+
+	if #list.outros > 1 then return list end
+
+	for i = 1, 2 do
+		list.outros[i] = list.outros[i] or getAudioPath("RaceEnd" .. i .. ".mp3", "#Default")
+	end
+
+	return list
+end
+
 ---Returns the index of a given audio source name.
----@param name string # Audio source name to look up.
+---@param source string? # Optional name of the audio source to look up. Defaults to `audio.source` if not specified.
 ---@return integer # Index position in the source list, or 0 if not found.
-local function getAudioIndex(name)
+local function getAudioIndex(source)
+	source = source or audio.source
 	local sources = getAudioSources()
-	for i, source in ipairs(sources) do
-		if source == name then
+	for i, name in ipairs(sources) do
+		if name == source then
 			return i
 		end
 	end
-	logErr(Text.LOG_FILE_NOT_FOUND, name)
+	logWarn(Text.LOG_SOURCE_MISSING, source)
 	return 0
 end
 
----Counts the number of sequentially indexed `RaceStart` tracks in the current source directory.
----@return integer # Number of valid `RaceStart` tracks found.
-local function getAudioCount()
-	if audio.count >= 0 then return audio.count end
-
-	local src = audio.source
-	if not src then return 0 end
-
-	local files = dir(getAudioSourceDir(true, src))
-	if not files or not next(files) then return 0 end
-
-	local map = {}
-	for _, file in ipairs(files) do
-		local name = file.name:lower()
-		local num = tonumber(name:match("^racestart(%d+)%.mp3$"))
-		if num then map[num] = true end
+---Retrieves a song from the active audio playlist by index or at random if no index is provided.
+---@param index integer? # Optional index of the song to retrieve. If omitted, a random song is selected.
+---@return string?, integer # The selected song path and its index, or nil and 0 if no valid song is available.
+local function getSongPath(index)
+	local songs = get(audio.playlist, "songs")
+	if type(songs) ~= "table" or #songs == 0 then
+		return nil, 0
 	end
-
-	for i = 1, 99 do
-		if not map[i] then
-			audio.count = i - 1
-			break
+	if type(index) == "number" then
+		if index < 1 then
+			index = 1
+		elseif index > #songs then
+			index = #songs
 		end
+	else
+		index = random(1, #songs)
 	end
-	return audio.count
+	return songs[index], index
 end
 
----Retrieves the duration of an audio file in seconds.
----@param name string # The song name without extension.
----@return number # Duration in seconds, or 0 if unavailable.
-local function getAudioDuration(name)
-	if not name then return 0 end
-	local path = getAudioPath(name)
-	local length = refs.radioExt.GetSongLength(path)
-	return floor((length or 0) / 1000)
+---Retrieves the outro track used when the player wins a race.
+---@return string # The file path of the win outro track.
+local function getWinOutroPath()
+	return get(audio.playlist, "outros", 1) or getAudioPath("RaceEnd1.mp3", "#Default")
+end
+
+---Retrieves the outro track used when the player loses a race.
+---@return string # The file path of the loss outro track.
+local function getLossOutroPath()
+	return get(audio.playlist, "outros", 2) or getAudioPath("RaceEnd2.mp3", "#Default")
 end
 
 ---Mutes the currently playing custom audio without stopping it.
@@ -611,10 +724,11 @@ local function stopAudio()
 end
 
 ---Plays the specified audio file once, optionally restoring global volume afterward.
----@param name string # The song name without extension.
+---@param path string # The full absolute path to the song file.
 ---@param doRestore boolean? # If true, restores global volume after playback finishes.
-local function playAudio(name, doRestore)
-	if not name then return end
+---@return number # Duration in milliseconds, or 0 if unavailable.
+local function playAudio(path, doRestore)
+	if not path then return 0 end
 
 	stopAudio()
 
@@ -623,34 +737,38 @@ local function playAudio(name, doRestore)
 	local volume = audio.volume / 100
 	muteGlobalVolume()
 
-	local path = getAudioPath(name)
-	refs.radioExt.Play(-1, path, -1, audio.isMuted and 0 or volume, 0)
+	local time = refs.radioExt.GetSongLength(path)
+	refs.radioExt.Play(-1, path, time, audio.isMuted and 0 or volume, 0.5)
 
-	if not doRestore then return end
+	if not doRestore then return time end
 
-	local delay = getAudioDuration(name)
+	local delay = floor(time / 1000)
 	asyncOnce(delay, function()
 		audio.isProtected = false
 		restoreGlobalVolume()
 	end)
+
+	return time
 end
 
 ---Starts an asynchronous randomized audio loop for continuous race music playback.
 local function playAudioRandomLoop()
-	local num, name
+	local path, i
 	for _ = 1, 10 do
-		num = random(1, getAudioCount())
-		name = "RaceStart" .. num
-		if audioFileExists(name) and audio.lastLoopIndex ~= num then
+		path, i = getSongPath()
+		if not path then
+			logErr(Text.LOG_PLAYLIST_INVALID)
+			return
+		end
+		if audio.lastLoopIndex ~= i then
 			break
 		end
 	end
-	audio.lastLoopIndex = num
 
-	playAudio(name)
+	audio.lastLoopIndex = i
 
-	local delay = getAudioDuration(name)
-	if delay <= 1 then return end
+	local delay = playAudio(path) / 1000
+	if delay < 40 then return end
 
 	audio.isLoopActive = true
 	asyncRepeat(delay, function()
@@ -740,7 +858,6 @@ local function createNativeMenu()
 	local sources = getAudioSources()
 	addOption(cat, Text.GUI_PLAYLIST, Text.GUI_PLAYLIST_TIP, 1, audio.index, 1, #sources, 1, sources,
 		function(value)
-			audio.count = -1
 			audio.index = value
 			audio.source = sources[value]
 			saveToFile()
@@ -749,7 +866,6 @@ local function createNativeMenu()
 
 	ns.addButton(cat, nil, Text.GUI_REFRESH_TIP, Text.GUI_REFRESH, 40,
 		function()
-			audio.count = -1
 			audio.index = 1
 			audio.sources = {}
 			createNativeMenu()
@@ -815,12 +931,12 @@ registerForEvent("onInit", function()
 	loadDatabase()
 
 	--Validate user config data.
-	audio.index = getAudioIndex(audio.source)
+	audio.index = getAudioIndex()
 	if audio.index < 1 then
-		audio.count = -1
 		audio.index = 1
 		audio.source = "#Default"
 	end
+	audio.playlist = getAudioPlaylist()
 
 	--Observes race UI events to control custom race music playback.
 	Observe("hudCarRaceController", "OnForwardVehicleRaceUIEvent", function(_, event)
@@ -852,7 +968,7 @@ registerForEvent("onInit", function()
 					asyncStop(id)
 
 					local isBestTime = ct.getBestTimeHook(ct.curTrackHook) < ct.prevTimeHook
-					playAudio(isBestTime and "RaceEnd1" or "RaceEnd2", true)
+					playAudio(isBestTime and getWinOutroPath() or getLossOutroPath(), true)
 				end)
 
 				logInfo(Text.LOG_RACE_ENDED)
@@ -860,7 +976,7 @@ registerForEvent("onInit", function()
 			end
 
 			local position = tonumber(Game.GetQuestsSystem():GetFactStr("sq024_current_race_player_position")) or 0
-			playAudio(position > 1 and "RaceEnd2" or "RaceEnd1", true)
+			playAudio(position > 1 and getLossOutroPath() or getWinOutroPath(), true)
 			logInfo(Text.LOG_RACE_FINISHED, position)
 		end
 	end)
@@ -943,8 +1059,8 @@ registerForEvent("onInit", function()
 			ct.isRaceCompletedHook = function()
 				if not ct.isPatched then return true end
 				if not ct.raceActive then return false end
-				local current = get(ct.raceLogicHook, 0, "cpNumber")
-				local total = get(ct.raceLogicHook, 0, "track", "totalCheckpoints")
+				local current = get(ct.raceLogicHook, "cpNumber") or 0
+				local total = get(ct.raceLogicHook, "track", "totalCheckpoints") or 0
 				return abs(current - total) < 1e-4
 			end
 
@@ -953,7 +1069,7 @@ registerForEvent("onInit", function()
 			---@return boolean # Returns true if the user setting 'backToStartOnFinish' is enabled.
 			ct.backToStartOnFinishHook = function()
 				if not ct.isPatched then return false end
-				return get(ct.userHook, false, "settings", "backToStartOnFinish") == true
+				return (get(ct.userHook, "settings", "backToStartOnFinish") or false) == true
 			end
 
 			---Retrieves the current race track name from the active race logic.
@@ -961,7 +1077,7 @@ registerForEvent("onInit", function()
 			---@return string? # The current track name, or nil if not available.
 			ct.getTrackName = function()
 				if not ct.isPatched then return nil end
-				return get(ct.raceLogicHook, nil, "track", "name")
+				return get(ct.raceLogicHook, "track", "name")
 			end
 
 			---Retrieves the best recorded race time for a given track.
@@ -970,7 +1086,7 @@ registerForEvent("onInit", function()
 			---@return number # The best recorded time in milliseconds, or infinity if unavailable.
 			ct.getBestTimeHook = function(name)
 				if not ct.isPatched or not name then return math.huge end
-				local times = get(ct.userHook, nil, "recentTimes") or {}
+				local times = get(ct.userHook, "recentTimes") or {}
 				local current = times[name]
 				if current then
 					table.sort(current, function(a, b)
@@ -1026,9 +1142,9 @@ registerForEvent("onDraw", function()
 		for i, item in ipairs(sources) do
 			local isSelected = current == i
 			if ImGui.Selectable(item, isSelected) and current ~= i then
-				audio.count = -1
 				audio.index = i
 				audio.source = sources[i]
+				audio.playlist = getAudioPlaylist()
 				audio.isUnsaved = true
 			end
 			if isSelected then
@@ -1040,7 +1156,6 @@ registerForEvent("onDraw", function()
 	addTooltip(scale, Text.GUI_PLAYLIST_TIP)
 	ImGui.SameLine()
 	if ImGui.Button("\u{f0450}", buttonSize, buttonSize) then
-		audio.count = -1
 		audio.index = 1
 		audio.sources = {}
 		createNativeMenu()
