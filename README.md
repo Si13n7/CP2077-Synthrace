@@ -130,7 +130,9 @@ Synthrace/
 ## 🎵 Music Credits
 
 The tracks featured in this mod include works from the following artists:
-Arcade Music Tribute, Hugo Lopes, Patrick Phelan.
+- [Patrick Phelan](https://en.wikipedia.org/wiki/Lotus_III%3A_The_Ultimate_Challenge)
+- [Hugo Lopes](https://www.youtube.com/@HugoLopesGuitar)
+- [Arcade Music Tribute](https://www.youtube.com/@ArcadeMusicTribute)
 
 All tracks used in this mod are the property of their respective creators and rights holders. This mod is a fan-made project intended for entertainment purposes only and is not affiliated with or endorsed by the artists or their labels.
 
